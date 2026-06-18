@@ -81,6 +81,26 @@
             android:enabled="true"
             android:exported="false" />
 
+        <!-- flutter_local_notifications: REQUIRED for zonedSchedule() reminders
+             (drink-water / stretch / wind-down) to actually fire. The plugin's
+             AlarmManager broadcast is delivered to ScheduledNotificationReceiver,
+             which displays the notification; without it the alarm fires but
+             nothing shows. The boot receiver re-arms the daily alarms after a
+             reboot / app update. -->
+        <receiver android:exported="false"
+            android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver" />
+        <receiver android:exported="false"
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver" />
+        <receiver android:exported="false"
+            android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
