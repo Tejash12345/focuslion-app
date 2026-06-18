@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "462666170165",
+    "project_id": "focuslion-b6b7a",
+    "storage_bucket": "focuslion-b6b7a.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:462666170165:android:ae9d47c0f9fec1ab17567c",
+        "android_client_info": {
+          "package_name": "com.focuslion.focuslion_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDa1C83wf4PLPUIIbOD408aAA9BCn7A5ec"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
