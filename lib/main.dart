@@ -56,6 +56,46 @@ const _notifChannel = 'focuslion_app';
 // session becomes available
 String? _fcmToken;
 
+// ---- deep linking: tapping a notification opens the matching web page ----
+String? _pendingDeepLink;          // set if a tap arrives before the WebView is ready
+WebViewController? _activeController;
+
+/// Maps a notification's `type` to the web-app route to open.
+String? _routeForType(String? type) {
+  switch (type) {
+    case 'friend_request':
+    case 'friend_accept':
+      return '/friends';
+    case 'like':
+    case 'comment':
+    case 'repost':
+      return '/feed';
+    case 'dm':
+      return '/chat';
+    case 'announcement':
+    case 'ai_briefing':
+      return '/';
+    default:
+      return null;
+  }
+}
+
+/// Navigates the in-app WebView to [route] (client-side, no full reload). If the
+/// WebView isn't ready yet (app launched by tapping a notification from a killed
+/// state), the route is held and applied once the first page finishes loading.
+void _openRoute(String? route) {
+  if (route == null || route.isEmpty) return;
+  final ctrl = _activeController;
+  if (ctrl == null) {
+    _pendingDeepLink = route;
+    return;
+  }
+  ctrl.runJavaScript(
+    "try{window.history.pushState({},'','$route');"
+    "window.dispatchEvent(new PopStateEvent('popstate'));}catch(e){}",
+  );
+}
+
 // Handles pushes that arrive while the app is backgrounded or killed. Runs in
 // its own isolate, so it must initialize Firebase itself. Android shows
 // notification-type messages in the system tray automatically; this is mainly
@@ -88,7 +128,11 @@ SupabaseClient get db => Supabase.instance.client;
 Future<void> _initNotifications() async {
   try {
     const androidInit = AndroidInitializationSettings('ic_stat_notification');
-    await _notifs.initialize(const InitializationSettings(android: androidInit));
+    await _notifs.initialize(
+      const InitializationSettings(android: androidInit),
+      // tapping a notification shown while the app is open deep-links via payload
+      onDidReceiveNotificationResponse: (resp) => _openRoute(resp.payload),
+    );
     final android = _notifs
         .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
     await android?.createNotificationChannel(const AndroidNotificationChannel(
@@ -109,6 +153,7 @@ Future<void> showAppNotification(String raw) async {
     final title = (data is Map && data['title'] != null) ? '${data['title']}' : 'FocusLion';
     final body = (data is Map && data['body'] != null) ? '${data['body']}' : '';
     final tag = (data is Map) ? data['tag'] : null;
+    final route = (data is Map) ? data['route'] as String? : null;
     final id = (tag is String ? tag.hashCode : DateTime.now().millisecondsSinceEpoch) & 0x7fffffff;
     await _notifs.show(
       id, title, body,
@@ -125,6 +170,7 @@ Future<void> showAppNotification(String raw) async {
           largeIcon: DrawableResourceAndroidBitmap('ic_notification_large'),
         ),
       ),
+      payload: route,
     );
   } catch (_) {}
 }
@@ -146,15 +192,16 @@ Future<void> _initFirebaseMessaging() async {
   // foreground: Android doesn't auto-display, so we show it ourselves
   FirebaseMessaging.onMessage.listen(_showRemoteMessage);
 
-  // user tapped the notification while the app was backgrounded (not killed)
+  // tapping a system-tray notification (app backgrounded or killed) opens the
+  // matching page in the WebView
   FirebaseMessaging.onMessageOpenedApp.listen((m) {
-    debugPrint('FCM tapped (background): ${m.messageId} data=${m.data}');
+    _openRoute(_routeForType(m.data['type'] as String?));
   });
 
-  // user tapped the notification that launched the app from a killed state
+  // app launched from a killed state by tapping a notification
   final initial = await fm.getInitialMessage();
   if (initial != null) {
-    debugPrint('FCM tapped (terminated): ${initial.messageId} data=${initial.data}');
+    _openRoute(_routeForType(initial.data['type'] as String?));
   }
 
   // the device's FCM token — cached + saved to Supabase so server triggers can
@@ -211,6 +258,7 @@ void _showRemoteMessage(RemoteMessage message) {
     // reuse the server-provided tag so a push and the web app's in-app
     // notification for the same event collapse instead of duplicating
     'tag': (message.data['tag'] as String?) ?? message.messageId,
+    'route': _routeForType(message.data['type'] as String?),
   }));
 }
 
@@ -269,6 +317,7 @@ class _WebShellState extends State<WebShell> {
   @override
   void dispose() {
     _usagePushTimer?.cancel();
+    _activeController = null;
     super.dispose();
   }
 
@@ -314,6 +363,12 @@ class _WebShellState extends State<WebShell> {
               _notifPrompted = true;
               _maybePromptNotifications();
             }
+            // apply a deep link that arrived before the WebView was ready
+            if (_pendingDeepLink != null) {
+              final r = _pendingDeepLink;
+              _pendingDeepLink = null;
+              _openRoute(r);
+            }
           },
         ),
       )
@@ -326,6 +381,9 @@ class _WebShellState extends State<WebShell> {
       android.setOnShowFileSelector(_pickFiles);
       android.setMediaPlaybackRequiresUserGesture(false);
     }
+
+    // expose this controller so notification taps can deep-link into the WebView
+    _activeController = controller;
 
     // keep the web Wellbeing page's "used today" in sync with the phone's real
     // per-app screen time while the app is open
