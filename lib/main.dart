@@ -87,7 +87,7 @@ SupabaseClient get db => Supabase.instance.client;
 
 Future<void> _initNotifications() async {
   try {
-    const androidInit = AndroidInitializationSettings('ic_launcher');
+    const androidInit = AndroidInitializationSettings('ic_stat_notification');
     await _notifs.initialize(const InitializationSettings(android: androidInit));
     final android = _notifs
         .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
@@ -118,6 +118,11 @@ Future<void> showAppNotification(String raw) async {
           channelDescription: 'Reminders and feed activity',
           importance: Importance.high,
           priority: Priority.high,
+          // branded notification icons: white silhouette in the status bar,
+          // full-colour FocusLion logo as the large icon ("app profile")
+          icon: 'ic_stat_notification',
+          color: Color(0xFF6C8CFF),
+          largeIcon: DrawableResourceAndroidBitmap('ic_notification_large'),
         ),
       ),
     );
