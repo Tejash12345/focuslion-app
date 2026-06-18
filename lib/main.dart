@@ -394,15 +394,23 @@ class _WebShellState extends State<WebShell> {
   void initState() {
     super.initState();
     controller = WebViewController(
-      // voice messages: when the site asks for the microphone, request the
-      // native permission and pass the grant through to the page
+      // voice messages: when the site asks for the microphone, make sure the
+      // OS-level mic permission is held, then pass the grant through to the
+      // page. Handles the case where the user previously tapped "Don't allow"
+      // (Android then never prompts again) by sending them to app settings.
       onPermissionRequest: (request) async {
         if (request.types.contains(WebViewPermissionResourceType.microphone)) {
-          final status = await Permission.microphone.request();
+          var status = await Permission.microphone.status;
+          if (!status.isGranted) status = await Permission.microphone.request();
           if (status.isGranted) {
             await request.grant();
           } else {
             await request.deny();
+            // permanently denied / restricted: Android won't show the prompt
+            // again, so open settings where the user can flip the switch
+            if (status.isPermanentlyDenied || status.isRestricted) {
+              await openAppSettings();
+            }
           }
           return;
         }
