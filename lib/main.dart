@@ -7,9 +7,12 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:timezone/data/latest.dart' as tzdata;
+import 'package:timezone/timezone.dart' as tz;
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 
@@ -113,6 +116,7 @@ Future<void> main() async {
   try {
     await Supabase.initialize(url: supabaseUrl, publishableKey: supabaseAnonKey);
   } catch (_) {}
+  await _initTimezone();
   await _initNotifications();
   try {
     await Firebase.initializeApp();
@@ -124,6 +128,21 @@ Future<void> main() async {
 }
 
 SupabaseClient get db => Supabase.instance.client;
+
+/// Sets the device's local timezone so scheduled reminders fire at the right
+/// local time.
+Future<void> _initTimezone() async {
+  try {
+    tzdata.initializeTimeZones();
+    final dynamic t = await FlutterTimezone.getLocalTimezone();
+    final name = (t is String) ? t : (t.identifier as String);
+    tz.setLocalLocation(tz.getLocation(name));
+  } catch (_) {
+    try {
+      tz.setLocalLocation(tz.getLocation('UTC'));
+    } catch (_) {}
+  }
+}
 
 Future<void> _initNotifications() async {
   try {
@@ -140,9 +159,59 @@ Future<void> _initNotifications() async {
       description: 'Reminders and feed activity',
       importance: Importance.high,
     ));
+    await _scheduleDailyReminders();
     // permission is requested through a friendly in-app prompt on first launch
     // (see _maybePromptNotifications), not silently here
   } catch (_) {}
+}
+
+/// Schedules recurring on-device reminders (drink water, stretch breaks, wind
+/// down) that fire even when the app is closed — via Android's alarm scheduler.
+/// Daily-repeating; re-scheduling with the same ids each launch keeps them fresh
+/// without creating duplicates.
+Future<void> _scheduleDailyReminders() async {
+  try {
+    const details = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _notifChannel, 'FocusLion',
+        channelDescription: 'Reminders and feed activity',
+        importance: Importance.high,
+        priority: Priority.high,
+        icon: 'ic_stat_notification',
+        color: Color(0xFF6C8CFF),
+      ),
+    );
+    // [notification id, hour-of-day, title, body]
+    final items = <List<Object>>[
+      for (final h in [9, 11, 13, 15, 17, 19, 21])
+        [700100 + h, h, '💧 Hydration check', 'Time to drink a glass of water. 💦'],
+      for (final h in [10, 12, 14, 16, 18, 20])
+        [700200 + h, h, '🧘 Stretch break', 'Stand up, stretch, and rest your eyes for a minute.'],
+      [700022, 22, '🌙 Wind down', 'Time to wrap up and get good sleep — tomorrow needs you sharp. 🦁'],
+    ];
+    for (final it in items) {
+      await _notifs.zonedSchedule(
+        it[0] as int,
+        it[2] as String,
+        it[3] as String,
+        _nextInstanceOfHour(it[1] as int),
+        details,
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+        matchDateTimeComponents: DateTimeComponents.time, // repeat daily at this time
+      );
+    }
+  } catch (e) {
+    debugPrint('scheduleReminders failed: $e');
+  }
+}
+
+tz.TZDateTime _nextInstanceOfHour(int hour) {
+  final now = tz.TZDateTime.now(tz.local);
+  var d = tz.TZDateTime(tz.local, now.year, now.month, now.day, hour);
+  if (!d.isAfter(now)) d = d.add(const Duration(days: 1));
+  return d;
 }
 
 /// Shows an Android notification. Called from the web app via the FLNotify
