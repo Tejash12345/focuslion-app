@@ -63,18 +63,24 @@ String? _fcmToken;
 String? _pendingDeepLink;          // set if a tap arrives before the WebView is ready
 WebViewController? _activeController;
 
-/// Maps a notification's `type` to the web-app route to open.
-String? _routeForType(String? type) {
+/// Maps a notification's data payload to the web-app route to open. For DMs we
+/// include the sender id so tapping the notification opens THAT conversation
+/// directly (Instagram-style) — the web ChatPage handles /chat?dm=<id>.
+String? _routeForType(Map<String, dynamic> data) {
+  final type = data['type'] as String?;
+  final sender = data['sender'] as String?;
   switch (type) {
     case 'friend_request':
-    case 'friend_accept':
       return '/friends';
+    case 'friend_accept':
+      // they accepted — open the chat to say hi (falls back to the friends list)
+      return (sender != null && sender.isNotEmpty) ? '/chat?dm=$sender' : '/friends';
     case 'like':
     case 'comment':
     case 'repost':
       return '/feed';
     case 'dm':
-      return '/chat';
+      return (sender != null && sender.isNotEmpty) ? '/chat?dm=$sender' : '/chat';
     case 'announcement':
     case 'ai_briefing':
       return '/';
@@ -275,13 +281,13 @@ Future<void> _initFirebaseMessaging() async {
   // tapping a system-tray notification (app backgrounded or killed) opens the
   // matching page in the WebView
   FirebaseMessaging.onMessageOpenedApp.listen((m) {
-    _openRoute(_routeForType(m.data['type'] as String?));
+    _openRoute(_routeForType(m.data));
   });
 
   // app launched from a killed state by tapping a notification
   final initial = await fm.getInitialMessage();
   if (initial != null) {
-    _openRoute(_routeForType(initial.data['type'] as String?));
+    _openRoute(_routeForType(initial.data));
   }
 
   // the device's FCM token — cached + saved to Supabase so server triggers can
@@ -338,7 +344,7 @@ void _showRemoteMessage(RemoteMessage message) {
     // reuse the server-provided tag so a push and the web app's in-app
     // notification for the same event collapse instead of duplicating
     'tag': (message.data['tag'] as String?) ?? message.messageId,
-    'route': _routeForType(message.data['type'] as String?),
+    'route': _routeForType(message.data),
   }));
 }
 
