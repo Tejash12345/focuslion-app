@@ -231,6 +231,70 @@ tz.TZDateTime _nextInstanceOfHour(int hour) {
   return d;
 }
 
+/// Schedules STUDY reminders from the user's timetable so they fire even when
+/// the app is closed. Hydration/break/sleep are scheduled natively above, but
+/// study reminders were web-only (the in-app engine only runs while the app is
+/// open) — which is why they never arrived. Re-reads the timetable and
+/// reschedules weekly-repeating, ~5 min before each block. Needs a signed-in
+/// session (called from the auth listener).
+Future<void> _scheduleStudyReminders() async {
+  try {
+    final user = db.auth.currentUser;
+    if (user == null) return;
+    // clear previously scheduled study reminders (dedicated id range) so
+    // edits/removals on the timetable take effect instead of piling up
+    for (var id = 720000; id < 720200; id++) {
+      await _notifs.cancel(id);
+    }
+    final rows = await db
+        .from('timetable_blocks')
+        .select('day_of_week, start_min, title')
+        .eq('user_id', user.id);
+    const details = NotificationDetails(
+      android: AndroidNotificationDetails(
+        _notifChannel, 'FocusLion',
+        channelDescription: 'Reminders and feed activity',
+        importance: Importance.high,
+        priority: Priority.high,
+        icon: 'ic_stat_notification',
+        color: Color(0xFF6C8CFF),
+      ),
+    );
+    var id = 720000;
+    for (final r in (rows as List)) {
+      if (id >= 720200) break; // safety cap
+      final dow = (r['day_of_week'] as num?)?.toInt();    // 0=Mon .. 6=Sun
+      final startMin = (r['start_min'] as num?)?.toInt(); // minutes from midnight
+      final title = (r['title'] as String?)?.trim();
+      if (dow == null || dow < 0 || dow > 6 || startMin == null) continue;
+      final remindMin = startMin - 5 < 0 ? 0 : startMin - 5; // nudge 5 min before
+      await _notifs.zonedSchedule(
+        id++,
+        '📚 Study time!',
+        '"${(title != null && title.isNotEmpty) ? title : 'Study session'}" starts soon — get ready!',
+        _nextInstanceOfDayAndTime(dow + 1, remindMin ~/ 60, remindMin % 60),
+        details,
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+        matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime, // weekly repeat
+      );
+    }
+  } catch (e) {
+    debugPrint('scheduleStudyReminders failed: $e');
+  }
+}
+
+/// Next occurrence of [weekday] (Dart 1=Mon..7=Sun) at [hour]:[minute].
+tz.TZDateTime _nextInstanceOfDayAndTime(int weekday, int hour, int minute) {
+  final now = tz.TZDateTime.now(tz.local);
+  var d = tz.TZDateTime(tz.local, now.year, now.month, now.day, hour, minute);
+  while (d.weekday != weekday || !d.isAfter(now)) {
+    d = d.add(const Duration(days: 1));
+  }
+  return d;
+}
+
 /// Shows an Android notification. Called from the web app via the FLNotify
 /// JavaScript channel (reminders, new likes/comments on your posts, etc.).
 Future<void> showAppNotification(String raw) async {
@@ -306,7 +370,10 @@ Future<void> _initFirebaseMessaging() async {
   // whenever a Supabase session becomes available (via the WebView SSO bridge
   // or manual login), persist this device's token so the server can target it
   db.auth.onAuthStateChange.listen((state) {
-    if (state.session != null) _saveFcmToken();
+    if (state.session != null) {
+      _saveFcmToken();
+      _scheduleStudyReminders(); // (re)schedule study reminders from the timetable
+    }
   });
 }
 
@@ -455,7 +522,9 @@ class _WebShellState extends State<WebShell> {
             _pushUsageToWeb();
             if (!_notifPrompted) {
               _notifPrompted = true;
-              _maybePromptNotifications();
+              // ask for the battery exemption right after notifications so the
+              // scheduled reminders actually fire (sequential — no overlap)
+              _maybePromptNotifications().then((_) => _maybePromptBattery());
             }
             // apply a deep link that arrived before the WebView was ready
             if (_pendingDeepLink != null) {
@@ -603,6 +672,53 @@ class _WebShellState extends State<WebShell> {
         );
         if (goSettings == true) await openAppSettings();
       }
+    } catch (_) {}
+  }
+
+  // One-time nudge to exempt the app from battery optimization, so Android —
+  // and especially aggressive OEMs like Motorola — doesn't kill the scheduled
+  // study/break/hydration/sleep reminders (AlarmManager alarms get dropped when
+  // the app is "restricted"). Capped so it never nags.
+  Future<void> _maybePromptBattery() async {
+    try {
+      if (await Permission.ignoreBatteryOptimizations.isGranted) return;
+      final prefs = await SharedPreferences.getInstance();
+      final shown = prefs.getInt('battery_prompts') ?? 0;
+      if (shown >= 2) return;
+      await prefs.setInt('battery_prompts', shown + 1);
+      if (!mounted) return;
+
+      final allow = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF161A28),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: const Text('🔋 Keep reminders on time',
+              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18)),
+          content: const Text(
+            'Allow FocusLion to run without battery restrictions so your study, '
+            'break, hydration and sleep reminders fire on time — even when the '
+            'app is closed. Otherwise your phone may delay or skip them.',
+            style: TextStyle(color: Colors.white70, height: 1.4),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Maybe later', style: TextStyle(color: Colors.white54)),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF6C8CFF),
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Allow'),
+            ),
+          ],
+        ),
+      );
+      if (allow != true) return;
+      await Permission.ignoreBatteryOptimizations.request();
     } catch (_) {}
   }
 
