@@ -114,7 +114,18 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
-    await Supabase.initialize(url: supabaseUrl, publishableKey: supabaseAnonKey);
+    // The WebView's JS supabase client is the SINGLE owner of the auth session
+    // and the only one allowed to refresh/rotate the refresh token. This native
+    // client only mirrors that session (see _onAuthToken), so its background
+    // auto-refresh is disabled: two clients refreshing the same refresh-token
+    // lineage rotate each other's tokens out from under them, which invalidated
+    // the WebView's stored token and intermittently kicked the user back to the
+    // login page on app open.
+    await Supabase.initialize(
+      url: supabaseUrl,
+      publishableKey: supabaseAnonKey,
+      authOptions: const FlutterAuthClientOptions(autoRefreshToken: false),
+    );
   } catch (_) {}
   await _initTimezone();
   await _initNotifications();
@@ -593,9 +604,24 @@ class _WebShellState extends State<WebShell> {
     if (raw.isEmpty) return;
     try {
       final data = jsonDecode(raw);
-      final refresh = (data is Map) ? data['refresh_token'] : null;
-      if (refresh is String && refresh.isNotEmpty && db.auth.currentSession == null) {
-        await db.auth.setSession(refresh);
+      if (data is! Map) return;
+      final access = data['access_token'];
+      final refresh = data['refresh_token'];
+      if (access is! String || access.isEmpty || refresh is! String || refresh.isEmpty) return;
+
+      // Mirror the web app's CURRENT session verbatim — do NOT rotate the
+      // refresh token. recoverSession() restores the session as-is and only
+      // hits the network when it's already expired, so we skip expiring tokens
+      // and let the WebView's client refresh them; _grabSession() runs on every
+      // page load, so we pick up the web's freshest token right after it
+      // rotates its own. The old setSession(refresh) path rotated the token and
+      // invalidated the WebView's stored copy, causing the random re-login.
+      final expiresAt = data['expires_at'];
+      final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final expiringSoon = expiresAt is int && expiresAt <= nowSec + 30;
+      final current = db.auth.currentSession;
+      if (!expiringSoon && (current == null || current.accessToken != access)) {
+        await db.auth.recoverSession(raw);
       }
       // keep the native blocker's config fresh on each load, so limits changed
       // on another device take effect without opening the Guard screen
