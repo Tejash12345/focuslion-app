@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -54,6 +55,29 @@ final pkgToName = <String, String>{
 
 final _notifs = FlutterLocalNotificationsPlugin();
 const _notifChannel = 'focuslion_app';
+
+// text-to-speech for the web app's pronounce buttons (Word of the Day). Android
+// WebView has no Web Speech API, so the web posts text to the FLSpeak channel
+// and we read it aloud natively here.
+final FlutterTts _tts = FlutterTts();
+
+Future<void> _initTts() async {
+  try {
+    await _tts.setLanguage('en-US');
+    await _tts.setSpeechRate(0.45); // 1.0 is too fast on Android
+    await _tts.setVolume(1.0);
+    await _tts.setPitch(1.0);
+  } catch (_) {}
+}
+
+Future<void> _speak(String text) async {
+  final t = text.trim();
+  if (t.isEmpty) return;
+  try {
+    await _tts.stop();
+    await _tts.speak(t);
+  } catch (_) {}
+}
 
 // this device's FCM token, cached so we can (re)save it to Supabase whenever a
 // session becomes available
@@ -135,6 +159,7 @@ Future<void> main() async {
   } catch (_) {}
   await _initTimezone();
   await _initNotifications();
+  await _initTts();
   try {
     await Firebase.initializeApp();
     await _initFirebaseMessaging();
@@ -507,6 +532,8 @@ class _WebShellState extends State<WebShell> {
       ..addJavaScriptChannel('FLAuth', onMessageReceived: (m) => _onAuthToken(m.message))
       // the web app posts notifications here; we show them as real Android ones
       ..addJavaScriptChannel('FLNotify', onMessageReceived: (m) => showAppNotification(m.message))
+      // the web app posts text here to be read aloud (WebView has no Web Speech API)
+      ..addJavaScriptChannel('FLSpeak', onMessageReceived: (m) => _speak(m.message))
       // the web app pings here whenever blocking limits change, so the native
       // Guard re-syncs and enforces the new caps/hours immediately
       ..addJavaScriptChannel('FLGuard', onMessageReceived: (_) => pushGuardConfig())
