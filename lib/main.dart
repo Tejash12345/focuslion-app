@@ -14,6 +14,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:timezone/data/latest.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
+import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 
@@ -27,6 +28,34 @@ const siteUrl = 'https://new-app-ruddy-nine.vercel.app';
 // rides in the URL query string as %20 and Supabase rejects the connection.
 final supabaseUrl = 'https://hgnbgnzgciooifwyfbgn.supabase.co'.trim();
 final supabaseAnonKey = 'sb_publishable_ayNbzdRu6Utt4BN3Zhc_lg_mnQuIJV0'.trim();
+
+// hosts that stay INSIDE the WebView. Anything else (e.g. a Learning Path
+// reference link to docs/YouTube) is handed to the system browser so the user
+// keeps their place in the app instead of the WebView navigating away.
+final _siteHost = Uri.parse(siteUrl).host;
+final _supabaseHost = Uri.parse(supabaseUrl).host;
+
+/// Decides whether a navigation stays in the WebView or opens externally.
+/// Off-site http(s) links and non-web schemes (mailto:, tel:, intent:…) the
+/// WebView can't render are launched in the system browser.
+Future<NavigationDecision> _routeNavigation(NavigationRequest request) async {
+  final uri = Uri.tryParse(request.url);
+  if (uri == null) return NavigationDecision.navigate;
+  final scheme = uri.scheme.toLowerCase();
+  final isWeb = scheme == 'http' || scheme == 'https';
+  // keep the app's own pages and Supabase auth/redirects in the WebView
+  if (isWeb && (uri.host.isEmpty || uri.host == _siteHost || uri.host == _supabaseHost)) {
+    return NavigationDecision.navigate;
+  }
+  // internal schemes the WebView handles itself
+  if (scheme == 'about' || scheme == 'blob' || scheme == 'data' || scheme == 'file') {
+    return NavigationDecision.navigate;
+  }
+  try {
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  } catch (_) {/* if nothing can open it, just swallow — better than a crash */}
+  return NavigationDecision.prevent;
+}
 // localStorage key supabase-js uses for the session inside the WebView
 const authStorageKey = 'sb-hgnbgnzgciooifwyfbgn-auth-token';
 
@@ -540,6 +569,7 @@ class _WebShellState extends State<WebShell> {
       ..setBackgroundColor(const Color(0xFF0B0D14))
       ..setNavigationDelegate(
         NavigationDelegate(
+          onNavigationRequest: _routeNavigation,
           onProgress: (p) => setState(() => progress = p),
           onPageStarted: (_) => setState(() => loading = true),
           onPageFinished: (_) {
