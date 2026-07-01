@@ -101,33 +101,22 @@ List<String> _ttsChunks = [];
 int _ttsPos = 0;
 bool _ttsPlaying = false;
 
+int _ttsRun = 0; // generation guard so a stale loop can't keep speaking
+
 Future<void> _initTts() async {
   try {
+    // resolve `await speak()` only when the phrase actually finishes — this is
+    // what makes the sentence-by-sentence loop (and pause/resume) reliable.
+    await _tts.awaitSpeakCompletion(true);
     await _tts.setLanguage('en-US');
     await _tts.setSpeechRate(0.45); // 1.0 is too fast on Android
     await _tts.setVolume(1.0);
     await _tts.setPitch(1.0);
-    _tts.setCompletionHandler(() {
-      // a sentence finished on its own -> advance the queue
-      if (!_ttsPlaying) return;
-      _ttsPos++;
-      _ttsSpeakCurrent();
-    });
   } catch (_) {}
 }
 
 void _ttsNotifyEnded() {
   _activeController?.runJavaScript('window.__flSpeakEnded && window.__flSpeakEnded();');
-}
-
-void _ttsSpeakCurrent() {
-  if (!_ttsPlaying) return;
-  if (_ttsPos >= _ttsChunks.length) {
-    _ttsPlaying = false;
-    _ttsNotifyEnded();
-    return;
-  }
-  _tts.speak(_ttsChunks[_ttsPos]);
 }
 
 List<String> _splitSentences(String text) {
@@ -139,23 +128,45 @@ List<String> _splitSentences(String text) {
   return parts.isEmpty ? <String>[text] : parts;
 }
 
+// Play the queue from _ttsPos. `await speak()` resolves per-sentence (see
+// awaitSpeakCompletion above); pausing/stopping flips _ttsPlaying and stops the
+// engine, which resolves the await so the loop exits WITHOUT advancing _ttsPos —
+// so resume replays the current sentence, then continues.
+Future<void> _ttsPlayLoop(int gen) async {
+  while (_ttsPlaying && gen == _ttsRun && _ttsPos < _ttsChunks.length) {
+    try {
+      await _tts.speak(_ttsChunks[_ttsPos]);
+    } catch (_) {}
+    if (!_ttsPlaying || gen != _ttsRun) return; // paused / stopped / superseded
+    _ttsPos++;
+  }
+  if (_ttsPlaying && gen == _ttsRun) {
+    _ttsPlaying = false;
+    _ttsNotifyEnded(); // reached the end on its own -> reset the web button
+  }
+}
+
 Future<void> _speak(String msg) async {
   final raw = msg.trim();
   if (raw.isEmpty) return;
   try {
     // legacy plain text -> speak once
     if (!raw.startsWith('{')) {
+      _ttsRun++;
       _ttsPlaying = false;
-      _ttsChunks = [];
       await _tts.stop();
       await _tts.setLanguage('en-US');
       await _tts.setSpeechRate(0.45);
-      await _tts.speak(raw);
+      _ttsChunks = _splitSentences(raw);
+      _ttsPos = 0;
+      _ttsPlaying = true;
+      unawaited(_ttsPlayLoop(_ttsRun));
       return;
     }
     final cmd = jsonDecode(raw) as Map<String, dynamic>;
     switch (cmd['a']) {
       case 'speak':
+        _ttsRun++;
         _ttsPlaying = false;
         await _tts.stop();
         final lang = cmd['lang'];
@@ -166,19 +177,21 @@ Future<void> _speak(String msg) async {
         _ttsChunks = _splitSentences((cmd['text'] as String?)?.trim() ?? '');
         _ttsPos = 0;
         _ttsPlaying = true;
-        _ttsSpeakCurrent();
+        unawaited(_ttsPlayLoop(_ttsRun));
         break;
       case 'pause':
-        _ttsPlaying = false; // stop the queue from advancing
-        await _tts.stop();   // halt the current sentence
+        _ttsPlaying = false; // loop exits without advancing _ttsPos
+        await _tts.stop();
         break;
       case 'resume':
-        if (_ttsChunks.isNotEmpty && _ttsPos < _ttsChunks.length) {
+        if (!_ttsPlaying && _ttsChunks.isNotEmpty && _ttsPos < _ttsChunks.length) {
           _ttsPlaying = true;
-          _ttsSpeakCurrent(); // replays current sentence, then continues
+          _ttsRun++;
+          unawaited(_ttsPlayLoop(_ttsRun));
         }
         break;
       case 'stop':
+        _ttsRun++;
         _ttsPlaying = false;
         _ttsChunks = [];
         _ttsPos = 0;
