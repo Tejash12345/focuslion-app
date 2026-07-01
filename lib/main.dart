@@ -170,7 +170,22 @@ Future<void> _speak(String msg) async {
         _ttsPlaying = false;
         await _tts.stop();
         final lang = cmd['lang'];
-        if (lang is String && lang.isNotEmpty) await _tts.setLanguage(lang);
+        if (lang is String && lang.isNotEmpty) {
+          // If the phone has no voice data for this language, Android "speaks"
+          // silently — so tell the web to guide the user to install it instead
+          // of looking broken.
+          bool available = true;
+          try {
+            available = (await _tts.isLanguageAvailable(lang)) == true;
+          } catch (_) {}
+          if (!available) {
+            _activeController?.runJavaScript(
+                'window.__flSpeakNoVoice && window.__flSpeakNoVoice(${jsonEncode(lang)});');
+            _ttsNotifyEnded();
+            return;
+          }
+          await _tts.setLanguage(lang);
+        }
         final rate = cmd['rate'];
         // web sends ~0.9; Android TTS is much faster, so scale down for clarity
         await _tts.setSpeechRate(rate is num ? (rate.toDouble() * 0.5) : 0.45);
