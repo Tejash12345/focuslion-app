@@ -85,10 +85,21 @@ final pkgToName = <String, String>{
 final _notifs = FlutterLocalNotificationsPlugin();
 const _notifChannel = 'focuslion_app';
 
-// text-to-speech for the web app's pronounce buttons (Word of the Day). Android
-// WebView has no Web Speech API, so the web posts text to the FLSpeak channel
-// and we read it aloud natively here.
+// text-to-speech for the web app. Android WebView has no Web Speech API, so the
+// web posts to the FLSpeak channel and we read it aloud natively.
+//
+// Two message formats are accepted (see web src/lib/speak.ts):
+//   • plain text  -> speak it (legacy: Word of the Day pronounce)
+//   • JSON command -> {a:'speak',text,lang,rate} | {a:'pause'} | {a:'resume'} | {a:'stop'}
+// For a JSON 'speak' we split into sentences and play them as a queue, so
+// pause / resume / stop work even though Android TTS has no native resume
+// (resume replays the current sentence, then continues). The web is told
+// controls exist via window.__FLSpeakV2, and we call window.__flSpeakEnded()
+// when playback finishes so its button resets to "Listen".
 final FlutterTts _tts = FlutterTts();
+List<String> _ttsChunks = [];
+int _ttsPos = 0;
+bool _ttsPlaying = false;
 
 Future<void> _initTts() async {
   try {
@@ -96,15 +107,85 @@ Future<void> _initTts() async {
     await _tts.setSpeechRate(0.45); // 1.0 is too fast on Android
     await _tts.setVolume(1.0);
     await _tts.setPitch(1.0);
+    _tts.setCompletionHandler(() {
+      // a sentence finished on its own -> advance the queue
+      if (!_ttsPlaying) return;
+      _ttsPos++;
+      _ttsSpeakCurrent();
+    });
   } catch (_) {}
 }
 
-Future<void> _speak(String text) async {
-  final t = text.trim();
-  if (t.isEmpty) return;
+void _ttsNotifyEnded() {
+  _activeController?.runJavaScript('window.__flSpeakEnded && window.__flSpeakEnded();');
+}
+
+void _ttsSpeakCurrent() {
+  if (!_ttsPlaying) return;
+  if (_ttsPos >= _ttsChunks.length) {
+    _ttsPlaying = false;
+    _ttsNotifyEnded();
+    return;
+  }
+  _tts.speak(_ttsChunks[_ttsPos]);
+}
+
+List<String> _splitSentences(String text) {
+  final parts = RegExp(r'\S[^.!?\n]*[.!?\n]*')
+      .allMatches(text)
+      .map((m) => m.group(0)!.trim())
+      .where((s) => s.isNotEmpty)
+      .toList();
+  return parts.isEmpty ? <String>[text] : parts;
+}
+
+Future<void> _speak(String msg) async {
+  final raw = msg.trim();
+  if (raw.isEmpty) return;
   try {
-    await _tts.stop();
-    await _tts.speak(t);
+    // legacy plain text -> speak once
+    if (!raw.startsWith('{')) {
+      _ttsPlaying = false;
+      _ttsChunks = [];
+      await _tts.stop();
+      await _tts.setLanguage('en-US');
+      await _tts.setSpeechRate(0.45);
+      await _tts.speak(raw);
+      return;
+    }
+    final cmd = jsonDecode(raw) as Map<String, dynamic>;
+    switch (cmd['a']) {
+      case 'speak':
+        _ttsPlaying = false;
+        await _tts.stop();
+        final lang = cmd['lang'];
+        if (lang is String && lang.isNotEmpty) await _tts.setLanguage(lang);
+        final rate = cmd['rate'];
+        // web sends ~0.9; Android TTS is much faster, so scale down for clarity
+        await _tts.setSpeechRate(rate is num ? (rate.toDouble() * 0.5) : 0.45);
+        _ttsChunks = _splitSentences((cmd['text'] as String?)?.trim() ?? '');
+        _ttsPos = 0;
+        _ttsPlaying = true;
+        _ttsSpeakCurrent();
+        break;
+      case 'pause':
+        _ttsPlaying = false; // stop the queue from advancing
+        await _tts.stop();   // halt the current sentence
+        break;
+      case 'resume':
+        if (_ttsChunks.isNotEmpty && _ttsPos < _ttsChunks.length) {
+          _ttsPlaying = true;
+          _ttsSpeakCurrent(); // replays current sentence, then continues
+        }
+        break;
+      case 'stop':
+        _ttsPlaying = false;
+        _ttsChunks = [];
+        _ttsPos = 0;
+        await _tts.stop();
+        _ttsNotifyEnded();
+        break;
+    }
   } catch (_) {}
 }
 
@@ -574,6 +655,8 @@ class _WebShellState extends State<WebShell> {
           onPageStarted: (_) => setState(() => loading = true),
           onPageFinished: (_) {
             setState(() => loading = false);
+            // tell the web app the native TTS bridge supports pause/resume/stop
+            _activeController?.runJavaScript('window.__FLSpeakV2 = true;');
             _grabSession();
             _checkForUpdate();
             _pushUsageToWeb();
