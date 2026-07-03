@@ -12,6 +12,7 @@ import android.view.View
 import android.view.animation.OvershootInterpolator
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 
@@ -98,11 +99,12 @@ private fun lionScreen(
             layoutParams = lp
         }
 
-    // The lion lives in a wide box (tag "lionBox") so the guard can drop a 3D
-    // WebView lion in on top of the emoji when online. Made large with headroom
-    // so big animations (e.g. the jump) are shown fully and never cut off.
+    // The real roaring-lion photo (bg-removed), animated natively — it pounces
+    // in, breathes and shakes. Replaced the old emoji + online-only Sketchfab
+    // 3D WebView lion: the image is instant, offline and looks the same
+    // everywhere.
     val density = context.resources.displayMetrics.density
-    val boxH = (360 * density).toInt()
+    val boxH = (280 * density).toInt()
     val lionBox = FrameLayout(context).apply {
         tag = "lionBox"
         layoutParams = LinearLayout.LayoutParams(
@@ -110,11 +112,9 @@ private fun lionScreen(
             boxH,
         ).apply { gravity = Gravity.CENTER_HORIZONTAL }
     }
-    val lion = TextView(context).apply {
-        text = "🦁"
-        textSize = 96f
-        setTextColor(Color.WHITE)
-        gravity = Gravity.CENTER
+    val lion = ImageView(context).apply {
+        setImageResource(R.drawable.lion)
+        scaleType = ImageView.ScaleType.FIT_CENTER
         layoutParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT,
@@ -166,7 +166,7 @@ private fun lionScreen(
 }
 
 /** Pounce in with an overshoot, then breathe forever and shake every few seconds. */
-private fun animateLion(lion: TextView) {
+private fun animateLion(lion: View) {
     lion.scaleX = 0.3f
     lion.scaleY = 0.3f
     lion.alpha = 0f

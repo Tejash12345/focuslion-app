@@ -14,8 +14,6 @@ import android.graphics.PixelFormat
 import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.MediaPlayer
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -24,10 +22,7 @@ import android.provider.Settings
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
-import android.webkit.JavascriptInterface
-import android.webkit.WebView
 import android.widget.FrameLayout
-import android.widget.TextView
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Calendar
@@ -60,9 +55,6 @@ class GuardService : Service() {
         const val KEY_CONFIG = "config_json"
         const val KEY_USAGE_DAY = "usage_day"
         const val KEY_USAGE_COUNTS = "usage_counts"
-        // the rigged, animated lion model shown on the block screen when online
-        const val LION_UID = "c87e400e549f40f39a22dff7bf256d34"
-
         fun dayKey(): Int {
             val c = Calendar.getInstance()
             return c.get(Calendar.YEAR) * 1000 + c.get(Calendar.DAY_OF_YEAR)
@@ -76,8 +68,6 @@ class GuardService : Service() {
     private var overlayView: View? = null
     private var overlayPkg: String? = null
     private var roar: MediaPlayer? = null
-    // optional 3D lion WebView shown on the block screen when online
-    private var lionWebView: WebView? = null
     // alarm volume we temporarily override while the roar plays, to restore after
     private var prevAlarmVol = -1
 
@@ -238,7 +228,7 @@ class GuardService : Service() {
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                 or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                 or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-                or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED, // WebGL for the 3D lion
+                or WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED, // smooth lion animations
             PixelFormat.OPAQUE,
         )
 
@@ -248,115 +238,9 @@ class GuardService : Service() {
             overlayView = root
             overlayPkg = pkg
             playRoar()
-            // when online, drop the real 3D animated lion in over the emoji
-            if (isOnline()) injectLion3D(content)
         } catch (_: Exception) {
         }
     }
-
-    /** Loads the animated 3D lion into the block screen's lion box (online only).
-     *  The native animated emoji underneath stays as an instant, offline fallback. */
-    private fun injectLion3D(content: View) {
-        val box = content.findViewWithTag<FrameLayout>("lionBox") ?: return
-        try {
-            val wv = WebView(this)
-            wv.setBackgroundColor(Color.TRANSPARENT)
-            wv.alpha = 0f
-            wv.settings.javaScriptEnabled = true
-            wv.settings.domStorageEnabled = true
-            wv.settings.mediaPlaybackRequiresUserGesture = false
-            wv.addJavascriptInterface(object {
-                @JavascriptInterface
-                fun onReady() {
-                    handler.post {
-                        // fade the 3D lion in and hide the emoji behind it
-                        wv.animate().alpha(1f).setDuration(400).start()
-                        (box.getChildAt(0) as? TextView)?.animate()?.alpha(0f)
-                            ?.setDuration(300)?.start()
-                    }
-                }
-            }, "Lion3D")
-            wv.loadDataWithBaseURL(
-                "https://sketchfab.com/", lion3dHtml(), "text/html", "utf-8", null,
-            )
-            box.addView(
-                wv,
-                FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                ),
-            )
-            lionWebView = wv
-        } catch (_: Exception) {
-        }
-    }
-
-    private fun isOnline(): Boolean {
-        return try {
-            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            val net = cm.activeNetwork ?: return false
-            val caps = cm.getNetworkCapabilities(net) ?: return false
-            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-        } catch (_: Exception) {
-            false
-        }
-    }
-
-    /** Sketchfab viewer page that auto-plays the lion's roar then loops idle. */
-    private fun lion3dHtml(): String = """
-<!DOCTYPE html><html><head>
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<style>html,body{margin:0;padding:0;height:100%;background:transparent;overflow:hidden}
-#f{width:100%;height:100%;border:0;display:block}</style>
-<script src="https://static.sketchfab.com/api/sketchfab-viewer-1.12.1.js"></script>
-</head><body>
-<iframe id="f" allow="autoplay;fullscreen;xr-spatial-tracking" allowfullscreen></iframe>
-<script>
-  var client = new Sketchfab('1.12.1', document.getElementById('f'));
-  var api=null, animDur=0, segTimer=null, segStart=0, segEnd=0, onEnd=null, TF=500;
-  // start on the roar, then cycle through every move on a loop
-  var SEQ=[[230,279],[5,64],[70,99],[105,124],[130,159],[165,194],[200,224],[285,324],[330,349],[355,500]];
-  var idx=0;
-  function clearSeg(){ if(segTimer){clearInterval(segTimer); segTimer=null;} onEnd=null; }
-  function runSeg(sf, ef, done){
-    if(!api) return; clearSeg();
-    segStart=(sf/TF)*animDur; segEnd=(ef/TF)*animDur; onEnd=done;
-    api.setSpeed(1); api.seekTo(segStart); api.play();
-    segTimer=setInterval(function(){
-      api.getCurrentTime(function(e,t){
-        if(e||t==null) return;
-        if(t>=segEnd-0.02 || t<segStart-0.4){ var cb=onEnd; clearSeg(); if(cb) cb(); }
-      });
-    }, 60);
-  }
-  function step(){ var s=SEQ[idx]; idx=(idx+1)%SEQ.length; runSeg(s[0], s[1], step); }
-  client.init('$LION_UID', {
-    success:function(a){ api=a; api.start();
-      api.addEventListener('viewerready', function(){
-        try{ api.setCycleMode('loopOne'); }catch(e){}
-        api.getCameraLookAt(function(err, c){
-          if(err||!c) return;
-          var p=c.position, t=c.target, f=0.95;
-          api.setCameraLookAt([t[0]+(p[0]-t[0])*f, t[1]+(p[1]-t[1])*f, t[2]+(p[2]-t[2])*f], t, 0);
-        });
-        api.getAnimations(function(err, anims){
-          if(!err && anims && anims.length){
-            animDur=anims[0][2]||0;
-            api.setCurrentAnimationByUID(anims[0][0], function(){
-              if(animDur>0){ step(); }
-              try{ Lion3D.onReady(); }catch(e){}
-            });
-          } else { try{ Lion3D.onReady(); }catch(e){} }
-        });
-      });
-    },
-    error:function(){},
-    autostart:1, autospin:0, ui_infos:0, ui_controls:0, ui_stop:0,
-    ui_watermark:1, ui_ar:0, ui_help:0, ui_settings:0, ui_vr:0,
-    ui_fullscreen:0, ui_annotations:0, ui_hint:0, transparent:1
-  });
-</script></body></html>
-"""
 
     /**
      * Plays the real lion roar over the block screen. Uses the ALARM usage so it
@@ -426,14 +310,6 @@ class GuardService : Service() {
         val v = overlayView ?: return
         overlayView = null
         overlayPkg = null
-        try {
-            lionWebView?.apply {
-                loadUrl("about:blank")
-                destroy()
-            }
-        } catch (_: Exception) {
-        }
-        lionWebView = null
         try {
             (getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(v)
         } catch (_: Exception) {
