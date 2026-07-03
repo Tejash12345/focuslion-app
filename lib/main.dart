@@ -1060,7 +1060,7 @@ class _WebShellState extends State<WebShell> with WidgetsBindingObserver {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        const Text('🦁', style: TextStyle(fontSize: 64)),
+                        Image.asset('assets/lion.png', width: 180),
                         const SizedBox(height: 16),
                         SizedBox(
                           width: 160,
