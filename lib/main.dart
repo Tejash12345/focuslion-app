@@ -359,6 +359,7 @@ Future<void> _scheduleDailyReminders() async {
         importance: Importance.high,
         priority: Priority.high,
         icon: 'ic_stat_notification',
+        largeIcon: DrawableResourceAndroidBitmap('ic_notification_large'),
         color: Color(0xFF6C8CFF),
       ),
     );
@@ -421,6 +422,7 @@ Future<void> _scheduleStudyReminders() async {
         importance: Importance.high,
         priority: Priority.high,
         icon: 'ic_stat_notification',
+        largeIcon: DrawableResourceAndroidBitmap('ic_notification_large'),
         color: Color(0xFF6C8CFF),
       ),
     );
