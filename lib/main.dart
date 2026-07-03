@@ -623,23 +623,39 @@ class WebShell extends StatefulWidget {
   State<WebShell> createState() => _WebShellState();
 }
 
-class _WebShellState extends State<WebShell> {
+class _WebShellState extends State<WebShell> with WidgetsBindingObserver {
   late final WebViewController controller;
   int progress = 0;
   bool loading = true;
   bool _notifPrompted = false;
   Timer? _usagePushTimer;
+  // retry budget for mirroring an expiring session (see _onAuthToken)
+  int _authRetries = 0;
 
   @override
   void dispose() {
     _usagePushTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     _activeController = null;
     super.dispose();
+  }
+
+  // Coming back from background is when the web client rotates an expired
+  // token — re-mirror it so the Guard's session never goes stale. onPageFinished
+  // alone missed this: a SPA doesn't reload pages, so resume had no trigger.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _authRetries = 0;
+      _grabSession();
+      _pushUsageToWeb();
+    }
   }
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     controller = WebViewController(
       // voice messages: when the site asks for the microphone, make sure the
       // OS-level mic permission is held, then pass the grant through to the
@@ -910,7 +926,21 @@ class _WebShellState extends State<WebShell> {
       final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
       final expiringSoon = expiresAt is int && expiresAt <= nowSec + 30;
       final current = db.auth.currentSession;
-      if (!expiringSoon && (current == null || current.accessToken != access)) {
+      if (expiringSoon) {
+        // The localStorage copy we grabbed is expired/expiring — the web client
+        // refreshes it within seconds of loading. Poll again shortly for the
+        // fresh token; without a retry, a session that was expired at launch
+        // never reached the native side at all (page load was the only
+        // trigger), so the Guard showed its login screen / failed to sync
+        // despite the web app being signed in.
+        if (_authRetries < 5) {
+          _authRetries++;
+          Future.delayed(const Duration(seconds: 3), _grabSession);
+        }
+        return;
+      }
+      _authRetries = 0;
+      if (current == null || current.accessToken != access) {
         await db.auth.recoverSession(raw);
       }
       // keep the native blocker's config fresh on each load, so limits changed
@@ -952,6 +982,10 @@ class _WebShellState extends State<WebShell> {
   }
 
   void _openGuard() {
+    // mirror the freshest web session right before entering — if the native
+    // copy went stale, GuardScreen's auth listener picks up the recovery live
+    _authRetries = 0;
+    _grabSession();
     Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardScreen()));
   }
 
