@@ -18,7 +18,6 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 
-import 'lion_3d.dart';
 import 'reminders.dart';
 
 const siteUrl = 'https://new-app-ruddy-nine.vercel.app';
@@ -1129,13 +1128,6 @@ class _GuardScreenState extends State<GuardScreen> {
             icon: const Icon(Icons.alarm),
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute(builder: (_) => const RemindersScreen()),
-            ),
-          ),
-          IconButton(
-            tooltip: 'Meet your 3D lion',
-            icon: const Text('🦁', style: TextStyle(fontSize: 22)),
-            onPressed: () => Navigator.of(context).push(
-              MaterialPageRoute(builder: (_) => const Lion3DScreen()),
             ),
           ),
         ],
