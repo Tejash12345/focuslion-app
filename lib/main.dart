@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:file_picker/file_picker.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -680,6 +682,8 @@ class _WebShellState extends State<WebShell> with WidgetsBindingObserver {
       },
     )
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      // pinch-to-zoom, like the page has in a normal mobile browser
+      ..enableZoom(true)
       // single sign-on: the page hands its Supabase session to the native side
       // so the Guard can sync your blocking settings without a second login
       ..addJavaScriptChannel('FLAuth', onMessageReceived: (m) => _onAuthToken(m.message))
@@ -1013,7 +1017,17 @@ class _WebShellState extends State<WebShell> with WidgetsBindingObserver {
                     SizedBox(
                       height: MediaQuery.of(context).size.height -
                           MediaQuery.of(context).padding.vertical,
-                      child: WebViewWidget(controller: controller),
+                      // the WebView must own its gestures: inside this ListView
+                      // the outer drag recognizer competed for touches, so
+                      // two-finger pinches never reached the page and zoom
+                      // didn't work (it does in a normal browser)
+                      child: WebViewWidget(
+                        controller: controller,
+                        gestureRecognizers: {
+                          Factory<OneSequenceGestureRecognizer>(
+                              () => EagerGestureRecognizer()),
+                        },
+                      ),
                     ),
                   ],
                 ),
