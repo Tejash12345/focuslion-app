@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -961,6 +962,17 @@ class _WebShellState extends State<WebShell> with WidgetsBindingObserver {
     // reels upload <input accept="video/*"> — let Android open the gallery's
     // video picker instead of a generic file browser
     final onlyVideos = accept.isNotEmpty && accept.every((t) => t.startsWith('video'));
+    // <input capture> (Leo Lens "Take photo") — the page explicitly asked for
+    // the CAMERA, so launch it instead of the gallery picker; falls back to
+    // the normal picker if the camera is unavailable/cancelled by error
+    if (params.isCaptureEnabled && onlyImages) {
+      try {
+        final shot = await ImagePicker().pickImage(
+          source: ImageSource.camera, maxWidth: 2048, imageQuality: 92);
+        if (shot == null) return []; // user backed out of the camera
+        return [Uri.file(shot.path).toString()];
+      } catch (_) {/* no camera — fall through to the gallery picker */}
+    }
     final result = await FilePicker.platform.pickFiles(
       allowMultiple: params.mode == FileSelectorMode.openMultiple,
       type: onlyImages
