@@ -3,6 +3,9 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- WebView getUserMedia(audio) needs this ALONGSIDE RECORD_AUDIO — without
+         it Chromium's audio capture fails and chat voice messages can't record -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <!-- ===== App-blocker guard ===== -->
     <!-- watch which app is in the foreground (user grants in Settings) -->
