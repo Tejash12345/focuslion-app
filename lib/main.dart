@@ -84,6 +84,7 @@ final pkgToName = <String, String>{
 
 final _notifs = FlutterLocalNotificationsPlugin();
 const _notifChannel = 'focuslion_app';
+const _callChannel = 'focuslion_calls';
 
 // text-to-speech for the web app. Android WebView has no Web Speech API, so the
 // web posts to the FLSpeak channel and we read it aloud natively.
@@ -243,6 +244,10 @@ String? _routeForType(Map<String, dynamic> data) {
       return '/feed';
     case 'dm':
       return (sender != null && sender.isNotEmpty) ? '/chat?dm=$sender' : '/chat';
+    case 'call':
+      // opening the chat lands on the caller's thread, where the caller's
+      // re-sent WebRTC offer raises the in-app ring/answer screen
+      return (sender != null && sender.isNotEmpty) ? '/chat?dm=$sender' : '/chat';
     case 'announcement':
     case 'ai_briefing':
       return '/';
@@ -338,6 +343,16 @@ Future<void> _initNotifications() async {
       _notifChannel, 'FocusLion',
       description: 'Reminders and feed activity',
       importance: Importance.high,
+    ));
+    // dedicated CALLS channel — max importance so an incoming call rings loudly
+    // (heads-up + sound + vibration) and can raise a full-screen ring even when
+    // the app is closed / the screen is locked
+    await android?.createNotificationChannel(const AndroidNotificationChannel(
+      _callChannel, 'Incoming calls',
+      description: 'Rings for incoming voice and video calls',
+      importance: Importance.max,
+      playSound: true,
+      enableVibration: true,
     ));
     await _scheduleDailyReminders();
     // permission is requested through a friendly in-app prompt on first launch
@@ -564,12 +579,47 @@ Future<void> _saveFcmToken() async {
   }
 }
 
+/// A full-screen, ringtone-loud notification for an incoming call. Uses the
+/// max-importance calls channel + full-screen intent so it wakes the screen and
+/// rings even when the phone is locked. Tapping it opens the caller's chat,
+/// where the caller's re-sent WebRTC offer raises the in-app answer screen.
+Future<void> _showCallNotification(String title, String body, String? route) async {
+  try {
+    await _notifs.show(
+      770001, // fixed id → a re-ring updates the same call notification
+      title, body,
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          _callChannel, 'Incoming calls',
+          channelDescription: 'Rings for incoming voice and video calls',
+          importance: Importance.max,
+          priority: Priority.max,
+          category: AndroidNotificationCategory.call,
+          fullScreenIntent: true, // wake + show over the lock screen
+          ongoing: true,
+          autoCancel: true,
+          icon: 'ic_stat_notification',
+          color: Color(0xFF6C8CFF),
+          largeIcon: DrawableResourceAndroidBitmap('ic_notification_large'),
+          timeoutAfter: 45000, // stop ringing if unanswered
+        ),
+      ),
+      payload: route,
+    );
+  } catch (_) {}
+}
+
 /// Converts an incoming push into the JSON shape [showAppNotification] expects
 /// and displays it via the existing flutter_local_notifications channel.
 void _showRemoteMessage(RemoteMessage message) {
   final n = message.notification;
   final title = n?.title ?? (message.data['title'] as String?) ?? 'FocusLion';
   final body = n?.body ?? (message.data['body'] as String?) ?? '';
+  // incoming calls get the loud, full-screen ring instead of a plain banner
+  if (message.data['type'] == 'call') {
+    _showCallNotification(title, body, _routeForType(message.data));
+    return;
+  }
   showAppNotification(jsonEncode({
     'title': title,
     'body': body,
