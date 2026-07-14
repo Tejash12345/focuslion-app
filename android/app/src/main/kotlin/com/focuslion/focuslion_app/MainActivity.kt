@@ -4,6 +4,7 @@ import android.app.AppOpsManager
 import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.MediaPlayer
 import android.net.Uri
@@ -101,6 +102,33 @@ class MainActivity : FlutterActivity() {
                         playRoar()
                         result.success(null)
                     }
+                    // ---- WebRTC call audio routing (earpiece vs loudspeaker) ----
+                    // The WebView's call audio follows the system audio mode; put
+                    // the phone in communication mode so a voice call plays through
+                    // the EARPIECE by default, and let the web toggle the speaker.
+                    "callAudioStart" -> {
+                        val speaker = call.argument<Boolean>("speaker") ?: false
+                        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                        am.mode = AudioManager.MODE_IN_COMMUNICATION
+                        routeAudio(am, speaker)
+                        result.success(null)
+                    }
+                    "callAudioSpeaker" -> {
+                        val on = call.argument<Boolean>("on") ?: false
+                        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                        routeAudio(am, on)
+                        result.success(null)
+                    }
+                    "callAudioEnd" -> {
+                        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                        try {
+                            if (Build.VERSION.SDK_INT >= 31) am.clearCommunicationDevice()
+                        } catch (_: Exception) {}
+                        @Suppress("DEPRECATION")
+                        am.isSpeakerphoneOn = false
+                        am.mode = AudioManager.MODE_NORMAL
+                        result.success(null)
+                    }
                     "setReminders" -> {
                         val json = call.argument<String>("json") ?: "[]"
                         ReminderScheduler.setReminders(this, json)
@@ -132,6 +160,29 @@ class MainActivity : FlutterActivity() {
 
     /** Plays the loud lion roar (alarm stream cranked to max, then restored) so
      *  the 3D lion screen can roar on demand. Same audio the guard uses. */
+    // Route active-call audio to the loudspeaker (true) or earpiece (false).
+    // Uses the modern setCommunicationDevice on API 31+, falls back to the
+    // deprecated speakerphone flag on older devices.
+    private fun routeAudio(am: AudioManager, speaker: Boolean) {
+        try {
+            if (Build.VERSION.SDK_INT >= 31) {
+                val type = if (speaker) AudioDeviceInfo.TYPE_BUILTIN_SPEAKER else AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                val dev = am.availableCommunicationDevices.firstOrNull { it.type == type }
+                if (dev != null) {
+                    am.setCommunicationDevice(dev)
+                    return
+                }
+            }
+            @Suppress("DEPRECATION")
+            am.isSpeakerphoneOn = speaker
+        } catch (_: Exception) {
+            try {
+                @Suppress("DEPRECATION")
+                am.isSpeakerphoneOn = speaker
+            } catch (_: Exception) {}
+        }
+    }
+
     private fun playRoar() {
         try {
             roarPlayer?.release()

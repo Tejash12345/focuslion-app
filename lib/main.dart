@@ -218,6 +218,26 @@ Future<void> _speak(String msg) async {
   } catch (_) {}
 }
 
+/// Bridges the web app's call-audio routing to the native AudioManager.
+/// {a:'start',speaker} enters communication mode (earpiece unless speaker),
+/// {a:'speaker',on} toggles loudspeaker, {a:'end'} restores normal routing.
+Future<void> _handleCallAudio(String raw) async {
+  try {
+    final cmd = jsonDecode(raw) as Map<String, dynamic>;
+    switch (cmd['a']) {
+      case 'start':
+        await channel.invokeMethod('callAudioStart', {'speaker': cmd['speaker'] == true});
+        break;
+      case 'speaker':
+        await channel.invokeMethod('callAudioSpeaker', {'on': cmd['on'] == true});
+        break;
+      case 'end':
+        await channel.invokeMethod('callAudioEnd');
+        break;
+    }
+  } catch (_) {}
+}
+
 // this device's FCM token, cached so we can (re)save it to Supabase whenever a
 // session becomes available
 String? _fcmToken;
@@ -751,6 +771,9 @@ class _WebShellState extends State<WebShell> with WidgetsBindingObserver {
       ..addJavaScriptChannel('FLNotify', onMessageReceived: (m) => showAppNotification(m.message))
       // the web app posts text here to be read aloud (WebView has no Web Speech API)
       ..addJavaScriptChannel('FLSpeak', onMessageReceived: (m) => _speak(m.message))
+      // the web app posts call-audio routing here (earpiece vs loudspeaker) so a
+      // voice call plays through the earpiece like a real phone call
+      ..addJavaScriptChannel('FLCallAudio', onMessageReceived: (m) => _handleCallAudio(m.message))
       // the web app pings here whenever blocking limits change, so the native
       // Guard re-syncs and enforces the new caps/hours immediately
       ..addJavaScriptChannel('FLGuard', onMessageReceived: (_) => pushGuardConfig())
