@@ -238,6 +238,23 @@ Future<void> _handleCallAudio(String raw) async {
   } catch (_) {}
 }
 
+/// Bridges the web app's screen-share requests to native MediaProjection.
+/// {a:'start'} launches the system "start casting?" prompt (native then streams
+/// frames back via the 'screenFrame' method handler); {a:'stop'} ends capture.
+Future<void> _handleScreen(String raw) async {
+  try {
+    final cmd = jsonDecode(raw) as Map<String, dynamic>;
+    switch (cmd['a']) {
+      case 'start':
+        await channel.invokeMethod('screenStart');
+        break;
+      case 'stop':
+        await channel.invokeMethod('screenStop');
+        break;
+    }
+  } catch (_) {}
+}
+
 // this device's FCM token, cached so we can (re)save it to Supabase whenever a
 // session becomes available
 String? _fcmToken;
@@ -774,6 +791,9 @@ class _WebShellState extends State<WebShell> with WidgetsBindingObserver {
       // the web app posts call-audio routing here (earpiece vs loudspeaker) so a
       // voice call plays through the earpiece like a real phone call
       ..addJavaScriptChannel('FLCallAudio', onMessageReceived: (m) => _handleCallAudio(m.message))
+      // screen sharing: the web asks to start/stop native MediaProjection capture;
+      // captured frames are pushed back via the 'screenFrame' method (below)
+      ..addJavaScriptChannel('FLScreen', onMessageReceived: (m) => _handleScreen(m.message))
       // the web app pings here whenever blocking limits change, so the native
       // Guard re-syncs and enforces the new caps/hours immediately
       ..addJavaScriptChannel('FLGuard', onMessageReceived: (_) => pushGuardConfig())
@@ -817,6 +837,23 @@ class _WebShellState extends State<WebShell> with WidgetsBindingObserver {
 
     // expose this controller so notification taps can deep-link into the WebView
     _activeController = controller;
+
+    // native → web: forward captured screen frames + capture-stopped events to
+    // the WebView (base64 is [A-Za-z0-9+/=] with NO_WRAP, safe to inline)
+    channel.setMethodCallHandler((call) async {
+      switch (call.method) {
+        case 'screenFrame':
+          final b64 = call.arguments as String?;
+          if (b64 != null && b64.isNotEmpty) {
+            controller.runJavaScript("window.__flScreenFrame && window.__flScreenFrame('$b64')");
+          }
+          break;
+        case 'screenStopped':
+          controller.runJavaScript('window.__flScreenStopped && window.__flScreenStopped()');
+          break;
+      }
+      return null;
+    });
 
     // keep the web Wellbeing page's "used today" in sync with the phone's real
     // per-app screen time while the app is open

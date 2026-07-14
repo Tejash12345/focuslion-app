@@ -1,5 +1,6 @@
 package com.focuslion.focuslion_app
 
+import android.app.Activity
 import android.app.AppOpsManager
 import android.content.Context
 import android.content.Intent
@@ -7,6 +8,7 @@ import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.MediaPlayer
+import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
@@ -22,10 +24,13 @@ class MainActivity : FlutterActivity() {
     private val channelName = "focuslion/guard"
     private var roarPlayer: MediaPlayer? = null
     private var prevAlarmVol = -1
+    private var methodChannel: MethodChannel? = null
+    private val reqScreen = 7731
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+        methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+        methodChannel!!
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "status" -> result.success(
@@ -129,6 +134,21 @@ class MainActivity : FlutterActivity() {
                         am.mode = AudioManager.MODE_NORMAL
                         result.success(null)
                     }
+                    // ---- screen sharing (MediaProjection) during a call ----
+                    "screenStart" -> {
+                        try {
+                            val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                            startActivityForResult(mgr.createScreenCaptureIntent(), reqScreen)
+                            result.success(true)
+                        } catch (_: Exception) {
+                            result.success(false)
+                        }
+                    }
+                    "screenStop" -> {
+                        ScreenCaptureService.frameCallback = null
+                        stopService(Intent(this, ScreenCaptureService::class.java))
+                        result.success(null)
+                    }
                     "setReminders" -> {
                         val json = call.argument<String>("json") ?: "[]"
                         ReminderScheduler.setReminders(this, json)
@@ -160,6 +180,29 @@ class MainActivity : FlutterActivity() {
 
     /** Plays the loud lion roar (alarm stream cranked to max, then restored) so
      *  the 3D lion screen can roar on demand. Same audio the guard uses. */
+    @Deprecated("startActivityForResult is fine for a single one-off permission prompt")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        @Suppress("DEPRECATION")
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != reqScreen) return
+        if (resultCode == Activity.RESULT_OK && data != null) {
+            // stream captured frames to the WebView; tell it if capture stops
+            ScreenCaptureService.frameCallback = { b64 ->
+                runOnUiThread { methodChannel?.invokeMethod("screenFrame", b64) }
+            }
+            ScreenCaptureService.onStopped = {
+                runOnUiThread { methodChannel?.invokeMethod("screenStopped", null) }
+            }
+            val svc = Intent(this, ScreenCaptureService::class.java)
+                .putExtra(ScreenCaptureService.EXTRA_CODE, resultCode)
+                .putExtra(ScreenCaptureService.EXTRA_DATA, data)
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(svc) else startService(svc)
+        } else {
+            // user declined the system "start casting?" prompt
+            methodChannel?.invokeMethod("screenStopped", null)
+        }
+    }
+
     // Route active-call audio to the loudspeaker (true) or earpiece (false).
     // Uses the modern setCommunicationDevice on API 31+, falls back to the
     // deprecated speakerphone flag on older devices.
