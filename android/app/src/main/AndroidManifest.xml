@@ -6,6 +6,14 @@
     <!-- WebView getUserMedia(audio) needs this ALONGSIDE RECORD_AUDIO — without
          it Chromium's audio capture fails and chat voice messages can't record -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- WebRTC VIDEO calls: getUserMedia(video) in the WebView needs the OS
+         camera permission held AND granted through onPermissionRequest. Without
+         this the camera silently fails and video calls fall back to voice. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- calls should work on tablets / camera-less devices too (voice only) -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
     <!-- ===== App-blocker guard ===== -->
     <!-- watch which app is in the foreground (user grants in Settings) -->

@@ -659,27 +659,36 @@ class _WebShellState extends State<WebShell> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     controller = WebViewController(
-      // voice messages: when the site asks for the microphone, make sure the
-      // OS-level mic permission is held, then pass the grant through to the
-      // page. Handles the case where the user previously tapped "Don't allow"
-      // (Android then never prompts again) by sending them to app settings.
+      // media capture (voice messages + WebRTC voice/video calls): when the
+      // site calls getUserMedia the WebView asks here for whatever it needs —
+      // microphone, camera, or both. We must hold the matching OS-level runtime
+      // permission BEFORE granting the WebView request, or Chromium's capture
+      // silently fails ("Calling…" forever / black video). Video calls issue
+      // TWO separate getUserMedia calls (audio-only + video-only), so this
+      // fires once per resource; handling each independently is correct.
+      // A previously "Don't allow"ed permission (Android then never re-prompts)
+      // routes the user to app settings to flip it on.
       onPermissionRequest: (request) async {
-        if (request.types.contains(WebViewPermissionResourceType.microphone)) {
-          var status = await Permission.microphone.status;
-          if (!status.isGranted) status = await Permission.microphone.request();
-          if (status.isGranted) {
-            await request.grant();
-          } else {
-            await request.deny();
-            // permanently denied / restricted: Android won't show the prompt
-            // again, so open settings where the user can flip the switch
-            if (status.isPermanentlyDenied || status.isRestricted) {
-              await openAppSettings();
-            }
-          }
+        final needMic = request.types.contains(WebViewPermissionResourceType.microphone);
+        final needCam = request.types.contains(WebViewPermissionResourceType.camera);
+        final wanted = <Permission>[
+          if (needMic) Permission.microphone,
+          if (needCam) Permission.camera,
+        ];
+        // non-media grants (e.g. clipboard/midi) pass straight through
+        if (wanted.isEmpty) {
+          await request.grant();
           return;
         }
-        await request.grant();
+        final results = await wanted.request();
+        final allGranted = results.values.every((s) => s.isGranted);
+        if (allGranted) {
+          await request.grant();
+        } else {
+          await request.deny();
+          final blocked = results.values.any((s) => s.isPermanentlyDenied || s.isRestricted);
+          if (blocked) await openAppSettings();
+        }
       },
     )
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
