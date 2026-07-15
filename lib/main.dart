@@ -717,6 +717,9 @@ class _WebShellState extends State<WebShell> with WidgetsBindingObserver {
   int progress = 0;
   bool loading = true;
   bool _notifPrompted = false;
+  // true while the WebView is on the chat/community pages — the floating Guard
+  // shield is hidden there so it doesn't sit on top of the full-screen chat
+  bool _onChatPage = false;
   Timer? _usagePushTimer;
   // retry budget for mirroring an expiring session (see _onAuthToken)
   int _authRetries = 0;
@@ -797,6 +800,9 @@ class _WebShellState extends State<WebShell> with WidgetsBindingObserver {
       // the web app pings here whenever blocking limits change, so the native
       // Guard re-syncs and enforces the new caps/hours immediately
       ..addJavaScriptChannel('FLGuard', onMessageReceived: (_) => pushGuardConfig())
+      // the web app posts its current route here on every navigation so we can
+      // hide the floating Guard shield on the chat/community pages
+      ..addJavaScriptChannel('FLRoute', onMessageReceived: (m) => _onRoute(m.message))
       ..setBackgroundColor(const Color(0xFF0B0D14))
       ..setNavigationDelegate(
         NavigationDelegate(
@@ -1123,6 +1129,13 @@ class _WebShellState extends State<WebShell> with WidgetsBindingObserver {
     Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuardScreen()));
   }
 
+  // the web app reports its current path (FLRoute channel); hide the floating
+  // Guard shield on the chat/community pages so it doesn't cover the chat
+  void _onRoute(String path) {
+    final onChat = path.startsWith('/chat') || path.startsWith('/community');
+    if (onChat != _onChatPage && mounted) setState(() => _onChatPage = onChat);
+  }
+
   @override
   Widget build(BuildContext context) {
     return PopScope(
@@ -1146,8 +1159,18 @@ class _WebShellState extends State<WebShell> with WidgetsBindingObserver {
                   padding: EdgeInsets.zero,
                   children: [
                     SizedBox(
+                      // Shrink with the keyboard (viewInsets.bottom). Without
+                      // this the WebView stays full-height inside the
+                      // RefreshIndicator's ListView, so when the keyboard opens
+                      // (adjustResize shrinks the body) the list overflows and
+                      // scrolls the whole page up — cutting off the chat header
+                      // and exposing the footer/background. Matching the visible
+                      // height keeps the web viewport correct so the chat's
+                      // fixed header stays pinned and the composer rides above
+                      // the keyboard, WhatsApp-style.
                       height: MediaQuery.of(context).size.height -
-                          MediaQuery.of(context).padding.vertical,
+                          MediaQuery.of(context).padding.vertical -
+                          MediaQuery.of(context).viewInsets.bottom,
                       child: WebViewWidget(controller: controller),
                     ),
                   ],
@@ -1157,7 +1180,9 @@ class _WebShellState extends State<WebShell> with WidgetsBindingObserver {
               // Floating app-blocker button, bottom-right. The web Lion AI
               // button sits bottom-LEFT at the same height, so the two are
               // balanced on opposite corners, just above the web bottom nav.
-              if (!loading)
+              // Hidden on the chat/community pages so it doesn't sit on top of
+              // the full-screen chat.
+              if (!loading && !_onChatPage)
                 Positioned(
                   right: 16,
                   bottom: 112,
