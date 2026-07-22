@@ -2,6 +2,11 @@
     xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- WebView navigator.vibrate() (game haptics in Lion Run + UI feedback)
+         silently no-ops in the Android System WebView unless the host app holds
+         this permission — it is a normal (install-time) permission, no runtime
+         prompt. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- WebView getUserMedia(audio) needs this ALONGSIDE RECORD_AUDIO — without
          it Chromium's audio capture fails and chat voice messages can't record -->
