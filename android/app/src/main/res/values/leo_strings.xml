@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="leo_accessibility_label">FocusLion Leo</string>
+    <string name="leo_accessibility_desc">Lets Leo, your FocusLion voice assistant, open the power menu, lock the screen, take screenshots, go home/back, and read the screen you were last on when you ask him about it (for example \"what should I reply?\"). Screen text is kept only in memory on your phone and is used only when you ask Leo.</string>
+</resources>

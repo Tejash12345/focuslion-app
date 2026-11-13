@@ -149,6 +149,17 @@ class MainActivity : FlutterActivity() {
                         stopService(Intent(this, ScreenCaptureService::class.java))
                         result.success(null)
                     }
+                    // Leo Live phone powers (open apps, call, alarm, torch, …)
+                    "device" -> {
+                        @Suppress("UNCHECKED_CAST")
+                        val args = (call.arguments as? Map<String, Any?>) ?: emptyMap()
+                        result.success(DeviceControl.handle(this, args))
+                    }
+                    // offline voice input for Leo Live (on-device recognizer)
+                    "deviceListen" -> {
+                        val lang = call.argument<String>("lang") ?: ""
+                        OfflineListen.listen(this, lang) { result.success(it) }
+                    }
                     "setReminders" -> {
                         val json = call.argument<String>("json") ?: "[]"
                         ReminderScheduler.setReminders(this, json)

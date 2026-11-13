@@ -1,3 +1,4 @@
+import 'dart:math';
 import 'dart:async';
 import 'dart:convert';
 
@@ -253,6 +254,42 @@ Future<void> _handleScreen(String raw) async {
         break;
     }
   } catch (_) {}
+}
+
+/// Leo Live phone powers. The web posts {id, a, ...} on the FLDevice channel;
+/// native code does it and we hand the result back to
+/// window.__flDeviceResult(id, {ok, msg, ...}).
+// Per-page secret, injected ONLY into the main frame on every page load. The
+// JS channel is visible to embedded iframes too (Instagram/Drive embeds), so a
+// command without the right token is ignored — only FocusLion itself can ask.
+String _deviceToken = '';
+String _newDeviceToken() {
+  final r = Random.secure();
+  return List.generate(24, (_) => r.nextInt(256).toRadixString(16).padLeft(2, '0')).join();
+}
+
+Future<void> _handleDevice(String raw) async {
+  String? id;
+  Map<String, dynamic> res;
+  try {
+    final cmd = (jsonDecode(raw) as Map).cast<String, dynamic>();
+    if (_deviceToken.isEmpty || cmd.remove('token') != _deviceToken) return; // not from our page
+    id = cmd['id']?.toString();
+    final a = cmd['a']?.toString() ?? '';
+    // names (not numbers) need the contacts permission — ask the first time
+    final who = cmd['who']?.toString() ?? '';
+    if ((a == 'call' || a == 'sms' || a == 'whatsapp') && RegExp(r'[A-Za-zఀ-౿ऀ-ॿ]').hasMatch(who)) {
+      await Permission.contacts.request();
+    }
+    final out = await channel.invokeMethod(a == 'listen' ? 'deviceListen' : 'device', cmd);
+    res = (out as Map?)?.cast<String, dynamic>() ?? {'ok': false, 'msg': 'No response'};
+  } catch (e) {
+    res = {'ok': false, 'msg': 'That did not work on this phone'};
+  }
+  if (id != null) {
+    _activeController?.runJavaScript(
+        'window.__flDeviceResult && window.__flDeviceResult(${jsonEncode(id)}, ${jsonEncode(res)});');
+  }
 }
 
 // this device's FCM token, cached so we can (re)save it to Supabase whenever a
@@ -803,6 +840,9 @@ class _WebShellState extends State<WebShell> with WidgetsBindingObserver {
       // the web app posts its current route here on every navigation so we can
       // hide the floating Guard shield on the chat/community pages
       ..addJavaScriptChannel('FLRoute', onMessageReceived: (m) => _onRoute(m.message))
+      // Leo Live voice assistant asks the phone to do things (open apps,
+      // call, alarms, flashlight, volume…) — see DeviceControl.kt
+      ..addJavaScriptChannel('FLDevice', onMessageReceived: (m) => _handleDevice(m.message))
       ..setBackgroundColor(const Color(0xFF0B0D14))
       ..setNavigationDelegate(
         NavigationDelegate(
@@ -812,7 +852,9 @@ class _WebShellState extends State<WebShell> with WidgetsBindingObserver {
           onPageFinished: (_) {
             setState(() => loading = false);
             // tell the web app the native TTS bridge supports pause/resume/stop
-            _activeController?.runJavaScript('window.__FLSpeakV2 = true;');
+            _deviceToken = _newDeviceToken();
+            _activeController?.runJavaScript(
+                'window.__FLSpeakV2 = true; window.__FLDeviceV1 = true; window.__FLDeviceToken = ${jsonEncode(_deviceToken)};');
             _grabSession();
             _checkForUpdate();
             _pushUsageToWeb();

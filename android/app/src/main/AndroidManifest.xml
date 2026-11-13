@@ -40,6 +40,17 @@
     <!-- keep the service alive -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- ===== Leo Live phone powers ===== -->
+    <!-- "call Mom" / "WhatsApp Ravi": look the name up in contacts (asked at
+         runtime the first time; only read, never uploaded) -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <!-- "set an alarm for 6": hands the alarm to the Clock app -->
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+    <!-- "turn on Do Not Disturb while I study" (granted once in Settings) -->
+    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
+    <!-- "brightness 40%" for the whole phone (granted once in Settings) -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" tools:ignore="ProtectedPermissions" />
+
     <application
         android:label="FocusLion"
         android:name="${applicationName}"
@@ -67,6 +78,21 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+
+        <!-- Leo Live "hands & eyes" (power menu, lock, screenshot, read the
+             last screen) — the user switches it on in Accessibility settings -->
+        <service
+            android:name=".LeoAccessibility"
+            android:label="@string/leo_accessibility_label"
+            android:exported="false"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/leo_accessibility" />
+        </service>
 
         <!-- the background watcher -->
         <service
@@ -155,6 +181,15 @@
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
+        </intent>
+        <!-- Leo Live offline voice: find the phone's speech recognizer -->
+        <intent>
+            <action android:name="android.speech.RecognitionService"/>
+        </intent>
+        <!-- Leo Live "open <app>": see the launchable apps to match by name -->
+        <intent>
+            <action android:name="android.intent.action.MAIN"/>
+            <category android:name="android.intent.category.LAUNCHER"/>
         </intent>
     </queries>
 </manifest>
