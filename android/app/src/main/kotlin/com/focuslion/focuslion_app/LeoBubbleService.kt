@@ -641,10 +641,31 @@ class LeoBubbleService : Service() {
             refresh()
             return
         }
+        // Leo's window isn't running yet: start it HIDDEN — it runs the command in
+        // the background and only shows itself if something needs you
+        if (LeoActivity.instance == null && (LeoAccessibility.instance != null || Settings.canDrawOverlays(this))) {
+            lastResult = "handled by Leo (window started hidden)"
+            launchLeoHidden(cmd)
+            startFollowing()
+            refresh()
+            return
+        }
         lastResult = "sent to Leo"
         pendingWake = cmd
         launchLeo()
         refresh()
+    }
+
+    /** Start Leo's window in the background with a command (no window popping up). */
+    private fun launchLeoHidden(cmd: String) {
+        AudioDuck.hold(this)
+        voice?.muteFollow(25_000)
+        main.removeCallbacks(releaseDuck)
+        main.postDelayed(releaseDuck, 30_000)
+        val i = Intent(this, LeoActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
+            .putExtra(LeoActivity.EXTRA_HIDDEN_CMD, cmd)
+        try { startActivity(i) } catch (_: Exception) { pendingWake = cmd; launchLeo() }
     }
 
     /**

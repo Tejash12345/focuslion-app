@@ -17,11 +17,14 @@ object QuickCommands {
 
     /** Would this command act on the screen (needs the Accessibility switch)? */
     fun isScreenCommand(raw: String): Boolean {
-        val w = normalize(raw).split(" ")
+        val n = normalize(raw)
+        val w = n.split(" ")
         if (parseScroll(w) != null) return true
+        if (LEO_OWNS.containsMatchIn(n) || Regex("^(reply|respond) to (?!(him|her|them|this|it)\\b)").containsMatchIn(n)) return false
         val first = w.firstOrNull() ?: return false
         return first in setOf("tap", "click", "press", "type", "next", "previous", "swipe", "like", "subscribe", "share",
-            "comment", "comments", "skip", "back", "home", "search") || w == listOf("go", "back")
+            "comment", "comments", "skip", "back", "home", "search", "save", "follow", "double", "reply", "post",
+            "heart", "bookmark", "auto") || w == listOf("go", "back")
     }
 
     fun tryRun(ctx: Context, raw: String): Boolean {
@@ -35,6 +38,10 @@ object QuickCommands {
         val wantsStop = words.any { it == "stop" || it == "enough" || it == "halt" } && words.size <= 4
         if (wantsStop && (a?.stopAutoScroll() == true || words.any { it == "scrolling" || it == "scroll" })) return a != null
 
+        // in Reels/Shorts "swipe up" means the NEXT video (the finger moves up)
+        if (a != null && t in setOf("swipe up", "swipe down", "go up one") && a.frontPackage() in REEL_APPS) {
+            return a.swipePage(t == "swipe up")
+        }
         // ---- scrolling, understood by meaning: direction, amount, speed, repeats ----
         parseScroll(words)?.let { plan ->
             val svc = a ?: return false
@@ -46,9 +53,19 @@ object QuickCommands {
 
         // ---- volume (any app) ----
         volume(ctx, words)?.let { return it }
+        // ---- Instagram / Reels / Shorts and everyday phone commands ----
+        daily(ctx, a, t, words, raw)?.let { return it }
+
         // ---- reels / shorts / videos: next & previous ----
+        val reelApp = a != null && a.frontPackage() in REEL_APPS
         when (t) {
-            "next", "next video", "next reel", "next short", "next one", "next song", "go next", "play next video", "play next" -> { a?.scroll(true); return a != null }
+            "next", "next video", "next reel", "next short", "next one", "next song", "go next", "play next video", "play next",
+            "next post", "swipe up", "skip this", "skip this reel", "skip reel", "skip video", "next shorts" -> {
+                if (reelApp) a?.swipePage(true) else a?.scroll(true); return a != null
+            }
+            "previous reel", "previous short", "previous post", "swipe down", "go up one", "last reel", "back to previous reel" -> {
+                if (reelApp) a?.swipePage(false) else a?.scroll(false); return a != null
+            }
             // during an ad, "skip" means the Skip button; otherwise next video
             "skip" -> return a?.tapText("skip ad") == true || a?.tapText("skip") == true || a?.scroll(true) == true
             "previous", "previous video", "previous reel", "go previous", "last one", "previous song" -> { a?.scroll(false); return a != null }
@@ -62,7 +79,7 @@ object QuickCommands {
             "skip ad", "skip the ad", "skip ads", "skip add", "skip this ad", "skip it" -> return a?.tapText("skip ad") == true || a?.tapText("skip") == true
             "like", "like this", "like video", "like this video", "like it" -> return a?.tapText("like") ?: false
             "subscribe", "subscribe to this channel", "subscribe channel", "subscribe to channel" -> return a?.tapText("subscribe") ?: false
-            "share", "share this" -> return a?.tapText("share") ?: false
+            "share", "share this", "share it" -> return a?.tapText("share") ?: false
             "comment", "comments", "open comments" -> return a?.tapText("comment") == true || a?.tapText("comments") == true
         }
         // ---- search inside the app you're using ----
@@ -111,6 +128,114 @@ object QuickCommands {
         }
         return false
     }
+
+    /** Apps with full-screen vertical videos (next = swipe a whole page). */
+    private val REEL_APPS = setOf("com.instagram.android", "com.google.android.youtube", "com.zhiliaoapp.musically",
+        "com.facebook.katana", "com.snapchat.android", "in.mohalla.video", "com.eterno.shortvideos",
+        "com.instagram.barcelona", "in.mohalla.sharechat")
+
+    private fun openUrl(ctx: Context, url: String, pkg: String): Boolean {
+        val i = Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)).setPackage(pkg)
+        return start(ctx, i) || start(ctx, Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)))
+    }
+
+    /** the user's own words after a command word ("reply Hello Ravi" -> "Hello Ravi"), original case */
+    private fun wordsAfter(raw: String, cmd: String): String =
+        Regex("(?i)^\\s*(please |hey |hi |ok |okay )*(leo[, ]*)?(please )?($cmd)[\\s,:]+(saying |that |with )?").replace(raw.trim(), "").trim()
+
+    /**
+     * Everyday commands people say all the time — Instagram, Reels, Shorts,
+     * likes/saves/follows, replies, camera, torch, Wi-Fi… null = not one of these.
+     */
+    private fun daily(ctx: Context, a: LeoAccessibility?, t: String, w: List<String>, raw: String): Boolean? {
+        val pkg = a?.frontPackage().orEmpty()
+        val insta = pkg == "com.instagram.android"
+        // open reels / shorts / Instagram pages (no Accessibility needed)
+        if (Regex("^(open |show |watch |start |go to )?(my )?(instagram |insta |ig )?reels?( on instagram)?( feed)?$").matches(t) &&
+            (w.any { it.startsWith("reel") })) return openUrl(ctx, "https://www.instagram.com/reels/", "com.instagram.android")
+        if (Regex("^(open |show |watch |play |start |go to )?(youtube )?shorts?( on youtube)?$").matches(t) && w.any { it.startsWith("short") })
+            return openUrl(ctx, "https://www.youtube.com/shorts/", "com.google.android.youtube")
+        if (Regex("^(open )?(my )?(instagram|insta|ig) (messages|message|dm|dms|chats?|inbox|direct)$").matches(t))
+            return openUrl(ctx, "https://www.instagram.com/direct/inbox/", "com.instagram.android")
+        if (Regex("^(open )?(instagram|insta|ig) (search|explore)$").matches(t))
+            return openUrl(ctx, "https://www.instagram.com/explore/", "com.instagram.android")
+        // reels autoplay: next one every few seconds ("stop" ends it)
+        if (Regex("^(auto ?(play|scroll|next)|keep (playing|watching|scrolling)|play (them |all )?one by one)( (the |all )?(reels?|shorts?|videos?))?( automatically)?$").matches(t) ||
+            Regex("^(auto ?(play|scroll)|play) (reels?|shorts?) automatically$").matches(t)) {
+            if (a == null || pkg !in REEL_APPS) return if (w.any { it.startsWith("reel") || it.startsWith("short") }) false else null
+            a.startAutoNext(12_000); return true
+        }
+        when (t) {
+            // like: double-tap works on any Instagram reel/post; elsewhere the Like button
+            "like", "like this", "like it", "like this reel", "like the reel", "like reel", "like this post", "like the post",
+            "like post", "heart", "heart it", "love it", "love this", "like this short", "like the video", "like this video", "like video" ->
+                return a?.tapText("like") == true ||
+                    (a != null && pkg in REEL_APPS && !a.hasEditable() && a.tapCenter(double = true))
+            "double tap", "double click", "double tap it" -> return a?.tapCenter(double = true) ?: false
+            "tap", "tap screen", "tap center", "tap the middle" -> return a?.tapCenter() ?: false
+            "save", "save this", "save it", "save reel", "save this reel", "save post", "save this post", "save video", "bookmark", "bookmark it" ->
+                return a?.tapText("save") == true || a?.tapText("add to saved") == true
+            "follow", "follow him", "follow her", "follow them", "follow this account", "follow this page", "follow this channel", "follow account" ->
+                return a?.tapText("follow") ?: false
+            "post", "post it", "post comment", "post this" -> return a?.tapText("post") ?: false
+            "close", "close this", "close it", "go out", "exit" -> return a?.global("back") ?: false
+        }
+        if (insta && (t == "pause" || t == "pause reel" || t == "pause video" || t == "play" || t == "resume" || t == "play reel")) {
+            val svc = a ?: return false
+            // after the audio duck lets the reel resume, then toggle
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ svc.tapCenter() }, 450)
+            return true
+        }
+        // reply / comment in the open chat or post (Leo types; "send"/"post" taps the button)
+        // "reply to Ravi saying hi" names a person: Leo's AI sends that one (WhatsApp/SMS)
+        if (Regex("^(reply|respond) to (?!(him|her|them|this|it)\\b)").containsMatchIn(t)) return null
+        Regex("^(reply|respond)( to (him|her|them|this|it))?( saying| with| that)? (.+)$").find(t)?.let {
+            val svc = a ?: return false
+            if (!svc.hasEditable()) return null // no message box on screen: Leo's AI handles it
+            val text = wordsAfter(raw, "(?:reply|respond)(?: to (?:him|her|them|this|it))?")
+            // Leo types it; you check it and say "send"
+            return text.isNotBlank() && svc.typeText(text)
+        }
+        Regex("^comment( saying| that| with)? (.+)$").find(t)?.let {
+            val svc = a ?: return false
+            val text = wordsAfter(raw, "comment")
+            if (text.isBlank()) return false
+            if (!svc.tapText("comment")) return false
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ svc.typeText(text) }, 1200)
+            return true // you say "post" to publish it
+        }
+        // camera / torch / connectivity
+        when {
+            Regex("^(take |click )(a |my )?(selfie|front photo)$").matches(t) || t == "selfie" ->
+                return start(ctx, Intent(android.provider.MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA)
+                    .putExtra("android.intent.extras.CAMERA_FACING", 1).putExtra("android.intent.extras.LENS_FACING_FRONT", 1)
+                    .putExtra("android.intent.extra.USE_FRONT_CAMERA", true))
+            Regex("^take (a )?(photo|picture|pic)$").matches(t) || t == "open camera" ->
+                return start(ctx, Intent(android.provider.MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA))
+            Regex("^(record|take|start) (a )?video$").matches(t) -> return start(ctx, Intent(android.provider.MediaStore.INTENT_ACTION_VIDEO_CAMERA))
+            Regex("^(turn |switch )?(on |off )?(the )?(flash ?light|torch|flash)( on| off)?$").matches(t) && w.any { it == "on" || it == "off" } ->
+                return torch(ctx, w.contains("on"))
+            Regex("^(turn |switch |open )?(on |off )?(the )?(wifi|wi fi)( on| off| settings)?$").matches(t) ->
+                return start(ctx, if (Build.VERSION.SDK_INT >= 29) Intent(Settings.Panel.ACTION_WIFI) else Intent(Settings.ACTION_WIFI_SETTINGS))
+            Regex("^((turn |switch )(on |off )?(the )?(mobile data|data|internet)( on| off)?|(open )?mobile data( settings)?)$").matches(t) ->
+                return start(ctx, if (Build.VERSION.SDK_INT >= 29) Intent(Settings.Panel.ACTION_INTERNET_CONNECTIVITY) else Intent(Settings.ACTION_WIRELESS_SETTINGS))
+            Regex("^(turn |switch |open )?(on |off )?(the )?bluetooth( on| off| settings)?$").matches(t) ->
+                return start(ctx, Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+            Regex("^(put |set |turn )?(phone |mobile )?(on |to )?(vibrate|vibration)( mode)?( on)?$").matches(t) -> return ringer(ctx, android.media.AudioManager.RINGER_MODE_VIBRATE)
+            Regex("^(put |set |turn )?(phone |mobile )?(on |to )?(ring|ringing|normal|sound)( mode)?( on)?$").matches(t) -> return ringer(ctx, android.media.AudioManager.RINGER_MODE_NORMAL)
+        }
+        return null
+    }
+
+    private fun torch(ctx: Context, on: Boolean): Boolean = try {
+        val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
+        val id = cm.cameraIdList.firstOrNull { cm.getCameraCharacteristics(it).get(android.hardware.camera2.CameraCharacteristics.FLASH_INFO_AVAILABLE) == true }
+        if (id == null) false else { cm.setTorchMode(id, on); true }
+    } catch (_: Exception) { false }
+
+    private fun ringer(ctx: Context, mode: Int): Boolean = try {
+        (ctx.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager).ringerMode = mode; true
+    } catch (_: Exception) { false }
 
     private val VAGUE = setOf("it", "this", "that", "me", "them", "something", "anything", "the app", "app")
     /** Leo's own features — never hijack these into a random app or settings page. */

@@ -234,6 +234,46 @@ class LeoAccessibility : AccessibilityService() {
         return dispatchGesture(g, null, null)
     }
 
+    /** The app on screen right now (not FocusLion's own bubble/overlay). */
+    fun frontPackage(): String = appRoot()?.packageName?.toString() ?: lastPkg
+
+    /** Is there a text box on screen (a chat or comment box)? */
+    fun hasEditable(): Boolean = firstEditable(appRoot()) != null
+
+    /** One full-page swipe: next / previous reel, short or story (needs canPerformGestures). */
+    fun swipePage(next: Boolean): Boolean = swipe(next)
+
+    /** Tap (or double-tap) the middle of the screen: like / pause a reel. */
+    fun tapCenter(double: Boolean = false): Boolean {
+        val dm = resources.displayMetrics
+        val x = dm.widthPixels / 2f
+        val y = dm.heightPixels * 0.45f
+        val b = android.accessibilityservice.GestureDescription.Builder()
+        fun tapAt(start: Long) = android.accessibilityservice.GestureDescription.StrokeDescription(
+            android.graphics.Path().apply { moveTo(x, y) }, start, 40)
+        b.addStroke(tapAt(0))
+        if (double) b.addStroke(tapAt(140))
+        return dispatchGesture(b.build(), null, null)
+    }
+
+    /** Reels / Shorts autoplay: go to the next one every `everyMs` until stopAutoScroll(). */
+    fun startAutoNext(everyMs: Long) {
+        stopAutoScroll()
+        autoScrolling = true
+        val until = System.currentTimeMillis() + 30 * 60_000
+        val startPkg = frontPackage()
+        val tick = object : Runnable {
+            override fun run() {
+                if (!autoScrolling || System.currentTimeMillis() > until) { autoScrolling = false; return }
+                // the user left the reels app: stop instead of swiping other screens
+                if (frontPackage() != startPkg) { autoScrolling = false; return }
+                swipe(true)
+                scrollLoop.postDelayed(this, everyMs)
+            }
+        }
+        scrollLoop.postDelayed(tick, 600)
+    }
+
     /** Is this text box a SEARCH box (not a chat/comment box, where Enter = Send)? */
     private fun isSearchField(n: AccessibilityNodeInfo?): Boolean {
         if (n == null || !n.isEditable || n.isPassword) return false

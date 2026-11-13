@@ -35,6 +35,8 @@ class LeoActivity : Activity() {
     companion object {
         /** the live Leo window (kept alive in the background between uses) */
         @Volatile var instance: LeoActivity? = null
+        /** start hidden and run this command in the background */
+        const val EXTRA_HIDDEN_CMD = "hidden_cmd"
         private const val URL = "https://new-app-ruddy-nine.vercel.app/leo"
         private const val HOST = "new-app-ruddy-nine.vercel.app"
         private const val REQ_PERMS = 5101
@@ -71,6 +73,7 @@ class LeoActivity : Activity() {
         web.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String) {
                 pageReady = true
+                hiddenCmd?.let { cmd -> hiddenCmd = null; deliverWhenReady(cmd, 0) }
                 // per-page token: embedded iframes can't send phone commands
                 token = ByteArray(24).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
                 view.evaluateJavascript(
@@ -122,9 +125,41 @@ class LeoActivity : Activity() {
         }
         web.loadUrl(URL)
         instance = this
+        intent?.getStringExtra(EXTRA_HIDDEN_CMD)?.takeIf { it.isNotBlank() }?.let { cmd ->
+            hiddenCmd = cmd
+            launchedHidden = true
+            moveTaskToBack(true) // stay out of sight: the page loads and acts in the background
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        val cmd = intent.getStringExtra(EXTRA_HIDDEN_CMD)?.takeIf { it.isNotBlank() } ?: run { launchedHidden = false; return }
+        launchedHidden = true
+        moveTaskToBack(true)
+        if (pageReady) deliverWhenReady(cmd, 0) else hiddenCmd = cmd
     }
 
     @Volatile private var pageReady = false
+    private var hiddenCmd: String? = null
+
+    /** Wait for the page's Leo to be ready (up to ~15 s), then give it the command. */
+    /** started hidden for a background command: not "on screen" until the user opens it */
+    private var launchedHidden = false
+
+    private fun deliverWhenReady(cmd: String, tries: Int) {
+        if (isFinishing || isDestroyed) return
+        web.evaluateJavascript("(typeof window.__flWake=='function'&&(window.__flWake(${JSONObject.quote(cmd)}),1))||0") { r ->
+            if (r?.trim() == "1") return@evaluateJavascript
+            if (tries < 30) web.postDelayed({ deliverWhenReady(cmd, tries + 1) }, 500)
+            else { // not signed in / page problem: show the window with the command
+                launchedHidden = false
+                LeoBubbleService.pendingWake = cmd
+                startActivity(Intent(this, LeoActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+            }
+        }
+    }
 
     /**
      * A command heard after "Hey Leo" while this window is in the background:
@@ -149,6 +184,7 @@ class LeoActivity : Activity() {
     override fun onResume() {
         super.onResume()
         resumed = true
+        if (launchedHidden) return // only passing through on the way to the background
         web.onResume()
         LeoBubbleService.markAppVisible(true) // hide the bubble + pause "Hey Leo" while Leo is open
         AudioDuck.hold(this) // pause YouTube/music while Leo listens — it isn't heard as commands
@@ -156,6 +192,7 @@ class LeoActivity : Activity() {
 
     override fun onPause() {
         resumed = false
+        if (launchedHidden) { super.onPause(); return }
         // NOT web.onPause(): the page keeps running in the background so later
         // "Hey Leo" commands are handled without opening this window again
         AudioDuck.release(this) // Leo stepped aside: music/video carries on
