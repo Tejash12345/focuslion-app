@@ -50,6 +50,10 @@
     <uses-permission android:name="android.permission.SEND_SMS" />
     <!-- scheduled messages fire on the exact minute (user grants "Alarms & reminders") -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- floating Leo bubble + offline "Hey Leo" while FocusLion is closed -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- "close Messages": stop an app after sending it to the background -->
+    <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
     <!-- "turn on Do Not Disturb while I study" (granted once in Settings) -->
     <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
     <!-- "brightness 40%" for the whole phone (granted once in Settings) -->
@@ -96,6 +100,16 @@
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/leo_accessibility" />
+        </service>
+
+        <!-- Leo everywhere: floating bubble + offline "Hey Leo" wake word -->
+        <service
+            android:name=".LeoBubbleService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Floating voice-assistant bubble the user turned on" />
         </service>
 
         <!-- the background watcher -->

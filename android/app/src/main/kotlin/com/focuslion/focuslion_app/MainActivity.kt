@@ -303,10 +303,17 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    // never listen for "Hey Leo" when FocusLion isn't on screen
+    // never listen for "Hey Leo" in-app when FocusLion isn't on screen; the
+    // floating bubble service takes over outside the app (and hides inside it)
     override fun onPause() {
         WakeListen.stop()
+        LeoBubbleService.markAppVisible(false)
         super.onPause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        LeoBubbleService.markAppVisible(true)
     }
 
     override fun onDestroy() {

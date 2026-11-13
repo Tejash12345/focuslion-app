@@ -64,6 +64,10 @@ object DeviceControl {
                 "screen_time" -> screenTime(activity)
                 "power_menu", "lock", "screenshot", "home", "back", "recents", "notifications", "quick_settings" -> globalAction(activity, a)
                 "read_screen" -> readScreen(activity)
+                "bubble_start" -> bubbleStart(activity, args["wake"] == true)
+                "bubble_stop" -> { LeoBubbleService.stop(activity); ok("Leo bubble off") }
+                "take_wake" -> { val w = LeoBubbleService.takeWake(); if (w == null) fail("none") else ok(w) }
+                "close_app" -> closeApp(activity, str(args, "name"))
                 "send_sms" -> sendSmsNow(activity, str(args, "who"), str(args, "text"))
                 "send_whatsapp" -> sendWhatsappNow(activity, str(args, "who"), str(args, "text"))
                 "schedule_message" -> scheduleMessage(activity, str(args, "app"), str(args, "who"), str(args, "text"), str(args, "at"))
@@ -397,6 +401,47 @@ object DeviceControl {
             "Battery $level%" + (if (bm.isCharging) " (charging)" else "") + " · %.1f of %.0f GB free · %s".format(freeGb, totalGb, net),
             mapOf("level" to level, "charging" to bm.isCharging, "freeGb" to freeGb, "network" to net, "model" to "${Build.MANUFACTURER} ${Build.MODEL}"),
         )
+    }
+
+    // ---------- Leo everywhere: floating bubble + offline "Hey Leo" ----------
+    private fun bubbleStart(activity: Activity, wake: Boolean): Map<String, Any?> {
+        if (!Settings.canDrawOverlays(activity)) {
+            activity.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${activity.packageName}")))
+            return fail("Allow \"Display over other apps\" for FocusLion, then turn the bubble on again")
+        }
+        val micOk = ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        LeoBubbleService.start(activity, wake && micOk)
+        return ok(if (wake && !micOk) "Bubble on — allow the microphone for \"Hey Leo\"" else "Leo bubble on")
+    }
+
+    /** "close Messages" — go home and stop that app's background process. */
+    private fun closeApp(activity: Activity, nameRaw: String): Map<String, Any?> {
+        val name = nameRaw.lowercase().removeSuffix(" app").trim()
+        val pm = activity.packageManager
+        var pkg: String? = aliases[name]
+        var label = nameRaw
+        if (pkg == null && name.isNotEmpty()) {
+            val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            pm.queryIntentActivities(launcher, 0).map { it.loadLabel(pm).toString() to it.activityInfo.packageName }
+                .firstOrNull { it.first.lowercase() == name || it.first.lowercase().startsWith(name) || it.first.lowercase().contains(name) }
+                ?.let { pkg = it.second; label = it.first }
+        }
+        if (pkg == null && name.isEmpty()) {
+            // "close this app": the last app the accessibility service saw
+            pkg = LeoAccessibility.lastPackage().ifEmpty { null }
+            label = LeoAccessibility.lastScreen().first
+        }
+        val target = pkg ?: return fail("I couldn't find an app called $nameRaw")
+        if (target == activity.packageName) return fail("I can't close myself — say bye instead")
+        // go home first so the app is in the background, then stop it
+        val home = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        LeoAccessibility.instance?.global("home") ?: activity.startActivity(home)
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            try {
+                (activity.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager).killBackgroundProcesses(target)
+            } catch (_: Exception) {}
+        }, 700)
+        return ok("Closed $label")
     }
 
     // ---------- accessibility powers (user enables "FocusLion Leo" once) ----------

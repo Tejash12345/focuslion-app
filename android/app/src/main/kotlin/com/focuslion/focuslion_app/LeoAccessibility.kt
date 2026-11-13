@@ -23,7 +23,9 @@ class LeoAccessibility : AccessibilityService() {
         @Volatile private var lastText: String = ""
         @Volatile private var lastApp: String = ""
         @Volatile private var lastAt: Long = 0
+        @Volatile private var lastPkg: String = ""
         fun lastScreen(): Triple<String, String, Long> = Triple(lastApp, lastText, lastAt)
+        fun lastPackage(): String = lastPkg
 
         // Leo just opened a WhatsApp chat with the user's confirmed text:
         // tap its Send button once, within this window
@@ -64,6 +66,7 @@ class LeoAccessibility : AccessibilityService() {
             packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
         } catch (_: Exception) { pkg }
         lastAt = now
+        lastPkg = pkg
     }
 
     private var homePkg: String? = null
