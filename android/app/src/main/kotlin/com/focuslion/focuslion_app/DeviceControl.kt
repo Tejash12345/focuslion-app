@@ -644,7 +644,16 @@ object DeviceControl {
             st["running"] != true -> "Not running — open FocusLion once"
             st["wake"] != true -> "Off"
             st["model"] != true -> "Downloading the voice model (needs internet once)…"
-            st["listening"] != true -> "Not listening right now (mic busy or screen off) — retrying…"
+            // inside FocusLion / Leo the app's own listener takes over: that's normal
+            st["appVisible"] == true -> "Ready ✓ — listens for “Hey Leo” as soon as you leave FocusLion (inside the app, Leo's own mic is used)"
+            st["screenOn"] == false -> "Screen is off — listening resumes when you turn it on ✓"
+            (st["enroll"] as? String) in setOf("preparing", "recording") -> "Paused while recording your voice…"
+            st["lockWaiting"] == true -> "Getting Voice Lock ready (needs internet once)…"
+            st["listening"] != true && (st["lastEnd"] as? String) == "mic" ->
+                "Another app is using the microphone (call, recorder, voice typing) — Leo retries every few seconds"
+            st["listening"] != true && (st["lastEnd"] as? String).orEmpty().startsWith("error") ->
+                "Mic problem: ${(st["lastEnd"] as String).removePrefix("error: ")} — retrying…"
+            st["listening"] != true -> "Starting the mic…"
             !battery -> "Listening — but battery saver may stop it (set FocusLion to Unrestricted)"
             else -> "Listening for “Hey Leo” ✓"
         }

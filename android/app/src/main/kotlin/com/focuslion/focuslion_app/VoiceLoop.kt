@@ -46,6 +46,9 @@ class VoiceLoop(
     @Volatile private var muteUntil = 0L
     fun muteFollow(ms: Long) { muteUntil = if (ms <= 0) 0L else System.currentTimeMillis() + ms }
 
+    /** why the loop ended ("" = asked to stop): "mic" = another app has the microphone */
+    @Volatile var endReason = ""
+
     fun followFor(ms: Long) { followUntil = if (ms <= 0) 0L else System.currentTimeMillis() + ms }
 
     companion object {
@@ -109,7 +112,7 @@ class VoiceLoop(
             // 6 s of hardware buffer: no overflow while the command recognizer catches up
             rec = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, rate, AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, rate * 2 * 6))
-            if (rec.state != AudioRecord.STATE_INITIALIZED) return@synchronized
+            if (rec.state != AudioRecord.STATE_INITIALIZED) { endReason = "mic"; return@synchronized }
             // grammar = only the wake phrases: tiny, accurate, low battery
             wakeRec = Recognizer(model, rate.toFloat(), "[\"hey leo\", \"hi leo\", \"okay leo\", \"hello leo\", \"ok leo\", \"[unk]\"]")
             wakeRec.setWords(true) // per-word confidence: video/music noise rarely scores high
@@ -150,7 +153,7 @@ class VoiceLoop(
 
             while (running) {
                 val n = rec.read(buf, 0, chunk)
-                if (n < 0) break // mic taken (call / other app) or dead: end, the service restarts us
+                if (n < 0) { endReason = "mic"; break } // mic taken (call / other app) or dead: end, the service restarts us
                 if (n == 0) { Thread.sleep(20); continue }
                 val piece = buf.copyOf(n)
                 ring.addLast(piece)
@@ -281,7 +284,8 @@ class VoiceLoop(
                 if (!spoke && now - capStart > 3000) { finish(""); continue }
                 if (now - capStart > 8000) { finish("$prefix ${afterWake(text(r.finalResult, "text"))}".trim()); continue }
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            endReason = "error: ${e.message ?: e.javaClass.simpleName}"
             // mic busy / model problem: reported through onEnd, the service restarts us
         } finally {
             try { rec?.stop() } catch (_: Exception) { }

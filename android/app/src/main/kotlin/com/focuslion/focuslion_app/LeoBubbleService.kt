@@ -93,6 +93,10 @@ class LeoBubbleService : Service() {
                 "model" to (s?.model != null),
                 "wake" to (s?.wakeWanted == true),
                 "enroll" to (s?.enrollState ?: ""),
+                "appVisible" to appVisible,
+                "screenOn" to (s?.screenOn ?: true),
+                "lockWaiting" to (s != null && VoicePrint.locked(s) && s.spkModel == null),
+                "lastEnd" to (s?.lastEnd ?: ""),
             )
         }
         /** A FocusLion page the Leo pop-up asked the full app to open. */
@@ -111,6 +115,8 @@ class LeoBubbleService : Service() {
     /** Voice Lock speaker model (loaded only when Voice Lock is used) */
     @Volatile private var spkModel: SpeakerModel? = null
     @Volatile var enrollState = ""
+    /** why the mic loop last stopped by itself (shown in settings) */
+    @Volatile var lastEnd = ""
     @Volatile private var destroyed = false
     @Volatile private var spkLoading = false
     private var voice: VoiceLoop? = null
@@ -471,6 +477,7 @@ class LeoBubbleService : Service() {
                 if (voice === loop) {
                     // the loop ended by itself (mic taken by a call, error): clean up, retry soon
                     voice = null
+                    lastEnd = loop.endReason
                     if (capturing) { capturing = false; listeningUi(false); AudioDuck.release(this) }
                     main.postDelayed({ refresh() }, 2000)
                 }
@@ -489,6 +496,7 @@ class LeoBubbleService : Service() {
         )
         voice = loop
         loop.start()
+        main.postDelayed({ if (voice === loop) lastEnd = "" }, 3000) // running fine
     }
 
     // ---------- after "Hey Leo" ----------
