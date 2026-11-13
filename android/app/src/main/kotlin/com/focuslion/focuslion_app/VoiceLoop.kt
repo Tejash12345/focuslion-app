@@ -9,6 +9,7 @@ import android.os.Looper
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
+import org.vosk.SpeakerModel
 
 /**
  * Leo's offline ears: ONE microphone loop that listens for "Hey Leo" and then
@@ -27,14 +28,45 @@ class VoiceLoop(
     private val onWake: () -> Unit,
     private val onCommand: (String) -> Unit,
     private val onEnd: () -> Unit,
+    /** true while a video / music is playing — the wake word must be extra clear then */
+    private val isNoisy: () -> Boolean = { false },
+    /** follow-up command heard WITHOUT "Hey Leo"; free = any command (quiet room only) */
+    private val onFollow: (String, Boolean) -> Unit = { _, _ -> },
+    /** Voice Lock: speaker model (null = off) and "is this result the owner's voice?" */
+    private val spk: SpeakerModel? = null,
+    private val owner: (String?) -> Boolean = { true },
+    /** a wake word / command in someone else's voice was ignored */
+    private val onStranger: () -> Unit = { },
 ) {
+    /** after a command, listen for follow-ups (no wake word) until this time */
+    @Volatile private var followUntil = 0L
+
+    /** Keep accepting short follow-up commands for `ms` (0 = stop following). */
+    /** Leo is speaking an answer: don't take his own words as follow-up commands */
+    @Volatile private var muteUntil = 0L
+    fun muteFollow(ms: Long) { muteUntil = if (ms <= 0) 0L else System.currentTimeMillis() + ms }
+
+    fun followFor(ms: Long) { followUntil = if (ms <= 0) 0L else System.currentTimeMillis() + ms }
+
     companion object {
         /** only one loop may own the microphone (and use the model) at a time */
         val mic = Any()
 
         private val WAKE = Regex("\\b(hey|hi|okay|ok|hello) leo\\b")
         private val WAKE_WORD = Regex("\\b(leo|lio|leon|leos)\\b")
+        /** a free-speech follow-up must START with one of these (a real command) */
+        private val VERBS = setOf("open", "call", "send", "message", "text", "play", "search", "scroll", "go",
+            "next", "pause", "resume", "stop", "skip", "volume", "turn", "set", "take", "swipe", "tap", "type",
+            "like", "close", "read", "start", "show", "whatsapp", "remind", "add", "make", "what's", "whats", "what",
+            "tell", "find", "increase", "decrease", "mute", "unmute", "slowly", "keep")
         private val NOISE = setOf("", "leo", "hey", "hey leo", "the", "a", "huh", "uh", "um", "hi", "hello")
+
+        /** Text after the LAST wake word; text with no wake word is kept as is. */
+        fun afterWake(text: String): String {
+            val t = text.trim().lowercase()
+            val m = WAKE_WORD.findAll(t).lastOrNull() ?: return t
+            return t.substring(m.range.last + 1).trim(' ', ',', '.')
+        }
 
         /** "the hey leo scroll down" / "hey lio scroll down" -> "scroll down" */
         fun stripWake(text: String): String {
@@ -69,29 +101,49 @@ class VoiceLoop(
         var rec: AudioRecord? = null
         var wakeRec: Recognizer? = null
         var cmdRec: Recognizer? = null
+        var followRec: Recognizer? = null
+        var freeRec: Recognizer? = null
         try {
             if (!running) return@synchronized
             val minBuf = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-            // 3 s of hardware buffer: no overflow while the command recognizer catches up
+            // 6 s of hardware buffer: no overflow while the command recognizer catches up
             rec = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, rate, AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, rate * 2 * 3))
+                AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, rate * 2 * 6))
             if (rec.state != AudioRecord.STATE_INITIALIZED) return@synchronized
             // grammar = only the wake phrases: tiny, accurate, low battery
             wakeRec = Recognizer(model, rate.toFloat(), "[\"hey leo\", \"hi leo\", \"okay leo\", \"hello leo\", \"ok leo\", \"[unk]\"]")
+            wakeRec.setWords(true) // per-word confidence: video/music noise rarely scores high
             // created up front so nothing is lost while it would be built later
             cmdRec = Recognizer(model, rate.toFloat())
+            // follow-up mode knows ONLY multi-word screen commands — a video's speech
+            // can't become "call mom", and each word must be heard with high confidence
+            followRec = Recognizer(model, rate.toFloat(), "[\"scroll down\", \"scroll up\", \"scroll down slowly\", \"slowly scroll\", \"slowly scroll down\", \"scroll a little\", \"scroll down a little\", \"scroll up a little\", \"scroll a lot\", \"keep scrolling\", \"stop scrolling\", \"scroll to the top\", \"scroll to the bottom\", \"go to the top\", \"go up\", \"go down\", \"next video\", \"next reel\", \"next song\", \"previous video\", \"go back\", \"go home\", \"pause video\", \"pause the video\", \"pause it\", \"skip ad\", \"skip the ad\", \"volume up\", \"volume down\", \"turn it up\", \"turn it down\", \"swipe left\", \"swipe right\", \"take a screenshot\", \"recent apps\", \"stop listening\", \"open whatsapp\", \"open youtube\", \"open instagram\", \"open chrome\", \"open gmail\", \"open maps\", \"open camera\", \"open settings\", \"open spotify\", \"open photos\", \"open gallery\", \"open messages\", \"open phone\", \"open contacts\", \"open calculator\", \"open clock\", \"open calendar\", \"open facebook\", \"open telegram\", \"open snapchat\", \"open play store\", \"open focuslion\", \"open files\", \"open music\", \"[unk]\"]")
+            followRec.setWords(true)
+            // free-speech follow-ups ("open whatsapp", "call mom") — only used when no
+            // video/music/Leo's voice is playing, and every word must be clear
+            freeRec = Recognizer(model, rate.toFloat())
+            freeRec.setWords(true)
+            if (spk != null) { // voice prints for every result we act on
+                cmdRec.setSpeakerModel(spk)
+                followRec.setSpeakerModel(spk)
+                freeRec.setSpeakerModel(spk)
+            }
             rec.startRecording()
-            val ring = ArrayDeque<ShortArray>() // recent audio
+            val ring = ArrayDeque<ShortArray>() // recent audio (~9 s)
             val buf = ShortArray(chunk)
             var capturing = false
             var capStart = 0L
             var spoke = false
+            var wasFollowing = false
+            var prefix = "" // command words already heard together with the wake word
 
-            fun finish(text: String) {
-                val cmd = stripWake(text)
+            fun finish(cmd: String) {
                 capturing = false
+                prefix = ""
                 cmdRec?.reset()
                 wakeRec?.reset()
+                followRec?.reset()
+                freeRec?.reset()
                 ring.clear()
                 main.post { onCommand(if (cmd in NOISE) "" else cmd) }
             }
@@ -102,36 +154,132 @@ class VoiceLoop(
                 if (n == 0) { Thread.sleep(20); continue }
                 val piece = buf.copyOf(n)
                 ring.addLast(piece)
-                while (ring.size > 10) ring.removeFirst()
+                while (ring.size > 45) ring.removeFirst() // ~9 s: long commands keep their start
+
+                // ---- follow-up commands (no "Hey Leo") for a while after a command ----
+                val now0 = System.currentTimeMillis()
+                val following = !capturing && now0 < followUntil && now0 >= muteUntil
+                if (following && !wasFollowing) { followRec?.reset(); freeRec?.reset() } // no leftover audio
+                wasFollowing = following
+                if (following) {
+                    val noisy = isNoisy()
+                    var hit: String? = null
+                    var hitRes: String? = null
+                    var free = false
+                    val f = followRec
+                    if (f != null && f.acceptWaveForm(piece, n)) {
+                        val res = f.result
+                        val said = text(res, "text")
+                        if (said.isNotEmpty() && !said.contains("[unk]") &&
+                            (!noisy || said.split(" ").size >= 2) &&
+                            confidentAll(res, if (noisy) 0.95 else 0.85)) { hit = said; hitRes = res }
+                    }
+                    val fr = freeRec
+                    if (fr != null) {
+                        if (noisy) fr.reset() // video / Leo talking: free speech is off
+                        else if (fr.acceptWaveForm(piece, n)) {
+                            val res = fr.result
+                            val said = afterWake(text(res, "text"))
+                            val words = said.split(" ").filter { it.isNotEmpty() }
+                            if (hit == null && words.size in 2..14 && words[0] in VERBS && confidentAll(res, 0.8)) {
+                                hit = said; hitRes = res; free = true
+                            }
+                        }
+                    }
+                    if (hit != null && spk != null && !owner(hitRes)) {
+                        f?.reset(); fr?.reset()
+                        ring.clear()
+                        main.post { onStranger() }
+                        continue
+                    }
+                    if (hit != null) {
+                        f?.reset(); fr?.reset()
+                        wakeRec?.reset()
+                        ring.clear() // never replay an executed follow-up again
+                        val said = hit; val isFree = free
+                        main.post { onFollow(said, isFree) }
+                        continue
+                    }
+                }
 
                 if (!capturing) {
                     val w = wakeRec ?: break
-                    val heard = if (w.acceptWaveForm(piece, n)) text(w.result, "text") else text(w.partialResult, "partial")
-                    if (WAKE.containsMatchIn(heard)) {
-                        capturing = true
-                        capStart = System.currentTimeMillis()
-                        spoke = false
-                        main.post { onWake() }
-                        // replay the recent audio so the start of the command isn't lost
-                        val r = cmdRec ?: break
-                        r.reset()
-                        for (p in ring.toList().takeLast(6)) r.acceptWaveForm(p, p.size)
-                        w.reset()
+                    // only a FINAL result with confident words counts — partial guesses
+                    // and low-confidence matches (YouTube speech, songs, TV) are ignored
+                    if (!w.acceptWaveForm(piece, n)) continue
+                    val res = w.result
+                    if (!WAKE.containsMatchIn(text(res, "text")) || !confidentWake(res, if (isNoisy()) 0.93 else 0.8)) continue
+                    w.reset()
+                    // double-check with the free-form recognizer BEFORE reacting, and keep
+                    // only words said AFTER "leo" (never the video's words before it)
+                    val r0 = cmdRec ?: break
+                    r0.reset()
+                    var heardWake = false
+                    var after = ""
+                    var wakeRes: String? = null
+                    for (p in ring.toList()) {
+                        if (r0.acceptWaveForm(p, p.size)) {
+                            val res0 = r0.result
+                            val t = text(res0, "text")
+                            val m = WAKE_WORD.findAll(t).lastOrNull()
+                            if (m == null) { // a later piece: the rest of the command
+                                if (heardWake && t !in NOISE) after = "$after $t".trim()
+                                continue
+                            }
+                            heardWake = true
+                            wakeRes = res0
+                            val c = t.substring(m.range.last + 1).trim(' ', ',', '.')
+                            after = if (c in NOISE) "" else c
+                        }
                     }
+                    var partial = text(r0.partialResult, "partial")
+                    var pm = WAKE_WORD.findAll(partial).lastOrNull()
+                    prefix = ""
+                    if (pm != null && spk != null) {
+                        // Voice Lock needs the voice print of the words with "leo": close that
+                        // piece now; words already said after it are kept as the command's start
+                        val res0 = r0.finalResult
+                        val t = text(res0, "text")
+                        val m = WAKE_WORD.findAll(t).lastOrNull()
+                        if (m != null) {
+                            heardWake = true
+                            wakeRes = res0
+                            val c = t.substring(m.range.last + 1).trim(' ', ',', '.')
+                            after = if (c in NOISE) "" else c // wake grammar ended at silence: phrase complete
+                        }
+                        partial = ""; pm = null
+                    } else if (after.isNotEmpty() && pm == null && partial !in NOISE) {
+                        // still talking: keep what we have and hear the rest
+                        prefix = after; after = ""
+                    }
+                    if (pm != null) heardWake = true
+                    if (!heardWake) { r0.reset(); ring.clear(); continue } // false wake: stay quiet
+                    if (spk != null && !owner(wakeRes)) { // not the owner's voice
+                        r0.reset(); ring.clear(); prefix = ""
+                        main.post { onStranger() }
+                        continue
+                    }
+                    capturing = true
+                    capStart = System.currentTimeMillis()
+                    main.post { onWake() }
+                    if (after.isNotEmpty()) { finish(after); continue }
+                    // the command may still be coming: keep listening (only what follows "leo")
+                    val tail = if (pm != null) partial.substring(pm.range.last + 1).trim() else ""
+                    spoke = tail !in NOISE || prefix.isNotEmpty()
                     continue
                 }
 
                 val r = cmdRec ?: break
                 val now = System.currentTimeMillis()
                 if (r.acceptWaveForm(piece, n)) {
-                    val t = text(r.result, "text")
-                    if (stripWake(t) !in NOISE) { finish(t); continue }
+                    val cmd = "$prefix ${afterWake(text(r.result, "text"))}".trim()
+                    if (cmd !in NOISE) { finish(cmd); continue }
                 } else {
-                    if (stripWake(text(r.partialResult, "partial")) !in NOISE) spoke = true
+                    if (afterWake(text(r.partialResult, "partial")) !in NOISE) spoke = true
                 }
                 // nothing said after "Hey Leo" -> hand over quickly (Leo listens himself)
                 if (!spoke && now - capStart > 3000) { finish(""); continue }
-                if (now - capStart > 7000) { finish(text(r.finalResult, "text")); continue }
+                if (now - capStart > 8000) { finish("$prefix ${afterWake(text(r.finalResult, "text"))}".trim()); continue }
             }
         } catch (_: Exception) {
             // mic busy / model problem: reported through onEnd, the service restarts us
@@ -140,10 +288,35 @@ class VoiceLoop(
             try { rec?.release() } catch (_: Exception) { }
             try { wakeRec?.close() } catch (_: Exception) { }
             try { cmdRec?.close() } catch (_: Exception) { }
+            try { followRec?.close() } catch (_: Exception) { }
+            try { freeRec?.close() } catch (_: Exception) { }
             running = false
             main.post { onEnd() }
         }
     }
+
+    /** Was EVERY word of the result heard with at least `min` confidence? */
+    private fun confidentAll(json: String?, min: Double): Boolean = try {
+        val arr = JSONObject(json ?: "{}").optJSONArray("result")
+        arr != null && arr.length() > 0 && (0 until arr.length()).all { arr.getJSONObject(it).optDouble("conf", 0.0) >= min }
+    } catch (_: Exception) { false }
+
+    /** Was "leo" (and the word before it) recognised with at least `min` confidence? */
+    private fun confidentWake(json: String?, min: Double): Boolean = try {
+        val arr = JSONObject(json ?: "{}").optJSONArray("result")
+        if (arr == null) true // no word details from the model: fall back to the text match
+        else {
+            var ok = false
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                if (o.optString("word") == "leo" && o.optDouble("conf", 0.0) >= min) {
+                    val prev = if (i > 0) arr.getJSONObject(i - 1).optDouble("conf", 0.0) else 1.0
+                    if (prev >= min - 0.1) ok = true
+                }
+            }
+            ok
+        }
+    } catch (_: Exception) { false }
 
     private fun text(json: String?, key: String): String =
         try { JSONObject(json ?: "{}").optString(key).trim().lowercase() } catch (_: Exception) { "" }

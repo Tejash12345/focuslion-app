@@ -87,6 +87,24 @@ object DeviceControl {
                 "read_messages" -> readMessages(activity, int(args, "minutes"))
                 "bubble_start" -> bubbleStart(activity, args["wake"] == true, args["bubble"] != false)
                 "leo_status" -> leoStatus(activity)
+                "voice_status" -> voiceStatus(activity)
+                "voice_enroll" -> {
+                    val s = LeoBubbleService.instance
+                    if (s == null) fail("Turn on “Hey Leo” first") else {
+                        val r = s.enrollVoice(); if (r == "ok") ok("Recording — keep talking for 12 seconds") else fail(r)
+                    }
+                }
+                "voice_lock" -> {
+                    if (args["on"] == true && VoicePrint.print(activity) == null) fail("Record your voice first")
+                    else {
+                        VoicePrint.setLock(activity, args["on"] == true, (args["strict"] as? Number)?.toInt())
+                        LeoBubbleService.instance?.restartWake()
+                        ok(if (args["on"] == true) "Voice Lock on — Leo answers only your voice" else "Voice Lock off")
+                    }
+                }
+                "voice_forget" -> { VoicePrint.clear(activity); LeoBubbleService.instance?.restartWake(); ok("Voice print deleted") }
+                "perm_status" -> permStatus(activity)
+                "open_perm" -> openPerm(activity, str(args, "which"))
                 "bubble_stop" -> { LeoBubbleService.stop(activity); ok("Leo bubble off") }
                 "take_route" -> { val r = LeoBubbleService.takeRoute(); if (r == null) fail("none") else ok(r) }
                 "take_wake" -> {
@@ -552,7 +570,68 @@ object DeviceControl {
         })
     }
 
+    // ---------- easy setup: what Leo is allowed to do, and one tap to fix each ----------
+    private fun granted(activity: Activity, perm: String) =
+        ContextCompat.checkSelfPermission(activity, perm) == PackageManager.PERMISSION_GRANTED
+
+    private fun permStatus(activity: Activity): Map<String, Any?> {
+        val pm = activity.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        val st = mapOf(
+            "mic" to granted(activity, Manifest.permission.RECORD_AUDIO),
+            "accessibility" to (LeoAccessibility.instance != null),
+            "overlay" to Settings.canDrawOverlays(activity),
+            "battery" to pm.isIgnoringBatteryOptimizations(activity.packageName),
+            "notifications" to LeoNotifications.hasAccess(activity),
+            "contacts" to granted(activity, Manifest.permission.READ_CONTACTS),
+            "sms" to granted(activity, Manifest.permission.SEND_SMS),
+            "phone" to granted(activity, Manifest.permission.CALL_PHONE),
+            "calendar" to granted(activity, Manifest.permission.READ_CALENDAR),
+            "location" to granted(activity, Manifest.permission.ACCESS_COARSE_LOCATION),
+        )
+        val missing = st.filterValues { it == false }.keys
+        return ok(if (missing.isEmpty()) "All set" else "Missing: ${missing.joinToString()}", st)
+    }
+
+    /** One tap: ask for the permission, or open the exact settings screen. */
+    private fun openPerm(activity: Activity, which: String): Map<String, Any?> {
+        fun ask(vararg perms: String): Map<String, Any?> {
+            androidx.core.app.ActivityCompat.requestPermissions(activity, arrayOf(*perms), 7500)
+            return ok("Asking…")
+        }
+        fun open(intent: Intent): Map<String, Any?> = start(activity, intent, "Opening settings…")
+        val pkg = Uri.parse("package:${activity.packageName}")
+        return when (which) {
+            "mic" -> ask(Manifest.permission.RECORD_AUDIO)
+            "contacts" -> ask(Manifest.permission.READ_CONTACTS)
+            "sms" -> ask(Manifest.permission.SEND_SMS)
+            "phone" -> ask(Manifest.permission.CALL_PHONE)
+            "calendar" -> ask(Manifest.permission.READ_CALENDAR)
+            "location" -> ask(Manifest.permission.ACCESS_COARSE_LOCATION)
+            "accessibility" -> open(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            "overlay" -> open(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, pkg))
+            "battery" -> open(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, pkg))
+            "notifications" -> open(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+            else -> fail("Unknown permission")
+        }
+    }
+
     /** "Hey Leo" health check for the settings screen. */
+    private fun voiceStatus(activity: Activity): Map<String, Any?> {
+        val enrolled = VoicePrint.print(activity) != null
+        val lock = VoicePrint.locked(activity)
+        val st = LeoBubbleService.instance?.enrollState ?: ""
+        val msg = when {
+            st == "preparing" -> "Getting ready…"
+            st == "recording" -> "Recording — keep talking…"
+            st.startsWith("failed") -> st.removePrefix("failed: ")
+            lock -> "On — Leo answers only your voice ✓"
+            enrolled -> "Voice recorded — Voice Lock is off"
+            else -> "Off — record your voice to turn it on"
+        }
+        return ok(msg, mapOf("lock" to lock, "enrolled" to enrolled, "strict" to VoicePrint.strict(activity), "state" to st,
+            "score" to VoicePrint.lastScore))
+    }
+
     private fun leoStatus(activity: Activity): Map<String, Any?> {
         val st = LeoBubbleService.status()
         val pm = activity.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager

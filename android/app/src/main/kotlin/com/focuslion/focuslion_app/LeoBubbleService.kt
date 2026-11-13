@@ -30,6 +30,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import org.json.JSONObject
 import org.vosk.Model
+import org.vosk.SpeakerModel
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -91,6 +92,7 @@ class LeoBubbleService : Service() {
                 "lastHeard" to lastHeard, "lastResult" to lastResult,
                 "model" to (s?.model != null),
                 "wake" to (s?.wakeWanted == true),
+                "enroll" to (s?.enrollState ?: ""),
             )
         }
         /** A FocusLion page the Leo pop-up asked the full app to open. */
@@ -106,6 +108,11 @@ class LeoBubbleService : Service() {
     private var wakeWanted = false
     private var bubbleWanted = true
     private var model: Model? = null
+    /** Voice Lock speaker model (loaded only when Voice Lock is used) */
+    @Volatile private var spkModel: SpeakerModel? = null
+    @Volatile var enrollState = ""
+    @Volatile private var destroyed = false
+    @Volatile private var spkLoading = false
     private var voice: VoiceLoop? = null
     private var screenOn = true
     private var lastFire = 0L
@@ -156,6 +163,7 @@ class LeoBubbleService : Service() {
     }
 
     override fun onDestroy() {
+        destroyed = true
         instance = null
         main.removeCallbacksAndMessages(null)
         stopWake()
@@ -164,6 +172,8 @@ class LeoBubbleService : Service() {
         // free the model only after the mic loop has really finished with it
         model?.let { m -> Thread { synchronized(VoiceLoop.mic) { try { m.close() } catch (_: Exception) {} } }.start() }
         model = null
+        spkModel?.let { s -> Thread { synchronized(VoiceLoop.mic) { try { s.close() } catch (_: Exception) {} } }.start() }
+        spkModel = null
         removeBubble()
         super.onDestroy()
     }
@@ -323,11 +333,13 @@ class LeoBubbleService : Service() {
                 val ready = File(dir, ".ready")
                 if (!ready.exists()) {
                     updateNotif("Downloading the “Hey Leo” voice model (one time, ~36 MB)…")
-                    download(dir)
+                    download(MODEL_URL, dir)
                     ready.createNewFile()
                 }
                 val root = dir.listFiles()?.firstOrNull { it.isDirectory && File(it, "am").exists() } ?: dir
                 val m = Model(root.absolutePath)
+                // Voice Lock on: the speaker model too (before listening starts)
+                if (VoicePrint.locked(this)) try { loadSpk() } catch (_: Exception) { }
                 main.post {
                     model = m
                     updateNotif(readyText())
@@ -339,9 +351,9 @@ class LeoBubbleService : Service() {
         }.start()
     }
 
-    private fun download(dir: File) {
+    private fun download(url: String, dir: File) {
         dir.deleteRecursively(); dir.mkdirs()
-        val conn = URL(MODEL_URL).openConnection() as HttpURLConnection
+        val conn = URL(url).openConnection() as HttpURLConnection
         conn.connectTimeout = 20_000; conn.readTimeout = 60_000
         conn.inputStream.use { input ->
             ZipInputStream(input.buffered()).use { zip ->
@@ -356,9 +368,100 @@ class LeoBubbleService : Service() {
         }
     }
 
+    /** Loads (downloading once, ~13 MB) the on-device speaker model for Voice Lock. Background thread only. */
+    @Synchronized private fun loadSpk(): SpeakerModel {
+        spkModel?.let { return it }
+        val dir = File(filesDir, VoicePrint.SPK_DIR)
+        val ready = File(dir, ".ready")
+        if (!ready.exists()) {
+            download(VoicePrint.SPK_URL, dir)
+            ready.createNewFile()
+        }
+        val root = dir.walkTopDown().maxDepth(2).firstOrNull { File(it, "mfcc.conf").exists() } ?: dir
+        val s = SpeakerModel(root.absolutePath)
+        spkModel = s
+        return s
+    }
+
+    /**
+     * Voice Lock setup: records the owner for ~12 s (on-device) and saves their
+     * voice print. Progress is shown through status()["enroll"].
+     */
+    fun enrollVoice(): String {
+        val m = model ?: return "The voice model is still getting ready — try again in a minute"
+        if (enrollState == "preparing" || enrollState == "recording") return "Already recording"
+        enrollState = "preparing"
+        main.post { stopWake() }
+        Thread {
+            try {
+                val s = loadSpk()
+                val vecs = ArrayList<FloatArray>()
+                var frames = 0
+                synchronized(VoiceLoop.mic) {
+                    if (destroyed) throw IllegalStateException("stopped")
+                    enrollState = "recording"
+                    val rate = 16000
+                    val minBuf = android.media.AudioRecord.getMinBufferSize(rate, android.media.AudioFormat.CHANNEL_IN_MONO, android.media.AudioFormat.ENCODING_PCM_16BIT)
+                    @SuppressLint("MissingPermission")
+                    val rec = android.media.AudioRecord(android.media.MediaRecorder.AudioSource.VOICE_RECOGNITION, rate,
+                        android.media.AudioFormat.CHANNEL_IN_MONO, android.media.AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, rate * 2))
+                    var r: org.vosk.Recognizer? = null
+                    try {
+                        r = org.vosk.Recognizer(m, rate.toFloat(), s)
+                        if (rec.state != android.media.AudioRecord.STATE_INITIALIZED) throw IllegalStateException("microphone busy")
+                        rec.startRecording()
+                        val buf = ShortArray(3200)
+                        val end = System.currentTimeMillis() + 12_000
+                        fun take(json: String?) {
+                            val v = VoicePrint.vector(json) ?: return
+                            if (v.second >= 40) { vecs += v.first; frames += v.second }
+                        }
+                        while (System.currentTimeMillis() < end) {
+                            val n = rec.read(buf, 0, buf.size)
+                            if (n < 0) break
+                            if (n == 0) { Thread.sleep(20); continue }
+                            if (r.acceptWaveForm(buf, n)) take(r.result)
+                        }
+                        take(r.finalResult)
+                    } finally {
+                        try { rec.stop() } catch (_: Exception) { }
+                        rec.release()
+                        try { r?.close() } catch (_: Exception) { }
+                    }
+                }
+                enrollState = if (vecs.isEmpty() || frames < 250) "failed: I didn't hear enough of your voice — speak the whole time and try again"
+                else { VoicePrint.save(this, VoicePrint.average(vecs)); "done" }
+            } catch (e: Exception) {
+                enrollState = "failed: ${e.message ?: "error"} — needs internet once to download the voice-ID model"
+            }
+            main.post { restartWake() }
+        }.start()
+        return "ok"
+    }
+
+    /** Voice Lock was switched / re-recorded: restart listening with the new setting. */
+    fun restartWake() {
+        stopWake()
+        refresh() // startWake loads the speaker model first if needed
+    }
+
     private fun startWake() {
         val m = model ?: return
         if (voice != null || capturing) return
+        if (enrollState == "preparing" || enrollState == "recording") return
+        val lock = VoicePrint.locked(this)
+        if (lock && spkModel == null) {
+            // load the speaker model first (once at a time), then try again
+            if (!spkLoading) {
+                spkLoading = true
+                Thread {
+                    try { loadSpk() } catch (_: Exception) { lastResult = "Voice Lock model missing — needs internet once" }
+                    spkLoading = false
+                    if (spkModel != null) main.post { refresh() }
+                }.start()
+            }
+            return
+        }
         lateinit var loop: VoiceLoop
         // callbacks from an old (stopped) loop are ignored: only the current one counts
         loop = VoiceLoop(m,
@@ -371,7 +474,19 @@ class LeoBubbleService : Service() {
                     if (capturing) { capturing = false; listeningUi(false); AudioDuck.release(this) }
                     main.postDelayed({ refresh() }, 2000)
                 }
-            })
+            },
+            // a video / song is playing: the wake word must be extra clear
+            isNoisy = { (getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager).isMusicActive },
+            onFollow = { said, free -> if (voice === loop) onFollowHeard(said, free) },
+            spk = if (lock) spkModel else null,
+            owner = { json -> VoicePrint.isOwner(this, json) },
+            onStranger = {
+                if (voice === loop) {
+                    val pct = (VoicePrint.lastScore * 100).toInt()
+                    lastResult = "ignored — not your voice" + (if (pct > -100) " (match $pct%)" else "")
+                }
+            },
+        )
         voice = loop
         loop.start()
     }
@@ -383,8 +498,12 @@ class LeoBubbleService : Service() {
     fun isCapturing() = capturing
 
     /** "Hey Leo" spotted: feedback now; the same mic loop keeps hearing the command. */
+    /** Was a video / music playing when "Hey Leo" was heard? (then unclear input is ignored) */
+    private var mediaWasPlaying = false
+
     private fun onWakeHeard() {
         if (appVisible || !screenOn) return
+        mediaWasPlaying = (getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager).isMusicActive
         capturing = true
         pendingWake = null
         buzz()
@@ -397,8 +516,8 @@ class LeoBubbleService : Service() {
         if (!capturing) return
         capturing = false
         listeningUi(false)
-        AudioDuck.release(this)
         lastHeard = cmd
+        if (cmd.isEmpty() || !sendable(cmd)) AudioDuck.release(this) // else held on while Leo answers
         // screen commands ("scroll down", "tap storage", "go back"…) run right
         // here on the app you're using — no Leo window popping up over it
         if (cmd.isNotEmpty() && LeoAccessibility.instance == null && QuickCommands.isScreenCommand(cmd)) {
@@ -411,12 +530,138 @@ class LeoBubbleService : Service() {
         if (handled) {
             lastResult = "done on screen"
             buzz()
+            startFollowing()
             refresh()
             return
         }
-        lastResult = if (cmd.isEmpty()) "opened Leo (no command heard)" else "sent to Leo"
+        // while a video/song plays, a "wake" with no clear command is almost always
+        // the video's own audio — ignore it instead of popping Leo up
+        if (mediaWasPlaying && (cmd.isEmpty() || cmd.split(" ").size < 2)) {
+            lastResult = "ignored (probably the video/music)"
+            refresh()
+            return
+        }
+        if (cmd.isEmpty()) {
+            lastResult = "opened Leo (no command heard)"
+            pendingWake = ""
+            launchLeo()
+            refresh()
+            return
+        }
+        // Leo's window was already opened once: handle the command in the
+        // background (he answers out loud and acts) — no window popping up again
+        if (sendToLeo(cmd)) {
+            lastResult = "handled by Leo in the background"
+            startFollowing()
+            refresh()
+            return
+        }
+        lastResult = "sent to Leo"
         pendingWake = cmd
         launchLeo()
+        refresh()
+    }
+
+    /**
+     * Leo's window was opened once and lives in the background: give him the
+     * command there (he answers out loud and acts) — the window does NOT pop up.
+     * If the page can't take it, the window opens with the command instead.
+     */
+    private fun sendToLeo(cmd: String): Boolean {
+        val leo = LeoActivity.instance ?: return false
+        // opening apps from the background needs the overlay (bubble) permission
+        if (LeoAccessibility.instance == null && !Settings.canDrawOverlays(this)) return false
+        AudioDuck.hold(this) // keep the video/music quiet while Leo answers
+        voice?.muteFollow(25_000) // his own voice must not become a follow-up command
+        main.removeCallbacks(releaseDuck)
+        main.postDelayed(releaseDuck, 25_000) // safety: never keep it paused for long
+        return leo.deliverInBackground(cmd) {
+            main.post {
+                main.removeCallbacks(releaseDuck)
+                releaseDuck.run()
+                pendingWake = cmd
+                launchLeo()
+            }
+        }
+    }
+
+    private val releaseDuck = Runnable {
+        voice?.muteFollow(0)
+        if (!capturing && !appVisible) AudioDuck.release(this)
+    }
+
+    /** Will this command go to Leo in the background (not a quick screen command)? */
+    private fun sendable(cmd: String): Boolean =
+        LeoActivity.instance != null && !QuickCommands.isScreenCommand(cmd) &&
+            (LeoAccessibility.instance != null || Settings.canDrawOverlays(this))
+
+    /** Leo finished speaking in the background window: music/video may resume. */
+    fun leoSpokeEnd() {
+        main.removeCallbacks(releaseDuck)
+        main.postDelayed(releaseDuck, 600)
+    }
+
+    // ---------- follow-up mode: more commands without saying "Hey Leo" again ----------
+    private val FOLLOW_MS = 45_000L
+    private val endFollow = Runnable { following(false) }
+
+    /** follow-ups can chain, but at most this long after the last "Hey Leo" */
+    private val FOLLOW_CAP = 4 * 60_000L
+    private var followStart = 0L
+    private var followOn = false
+
+    private fun startFollowing() {
+        followStart = System.currentTimeMillis()
+        extendFollowing()
+    }
+
+    private fun extendFollowing() {
+        if (System.currentTimeMillis() - followStart > FOLLOW_CAP) { stopFollowing(); return }
+        voice?.followFor(FOLLOW_MS)
+        following(true)
+        main.removeCallbacks(endFollow)
+        main.postDelayed(endFollow, FOLLOW_MS)
+    }
+
+    private fun stopFollowing() {
+        voice?.followFor(0)
+        main.removeCallbacks(endFollow)
+        following(false)
+    }
+
+    /** green ring on the bubble = "still listening for your next command" */
+    private fun following(on: Boolean) {
+        followOn = on
+        val b = bubble ?: return
+        val bg = b.background as? GradientDrawable ?: return
+        val d = resources.displayMetrics.density
+        if (on) bg.setStroke((3 * d).toInt(), 0xFF34D399.toInt()) else bg.setStroke((2 * d).toInt(), 0xCCBAE6FD.toInt())
+        if (on && !hiddenByUser) b.visibility = View.VISIBLE
+    }
+
+    /**
+     * A follow-up command (no "Hey Leo"). Screen/app commands run right here;
+     * other clear commands ("call mom", "send hi to Ravi") go to Leo in the
+     * background — his window doesn't pop up again.
+     */
+    private fun onFollowHeard(said: String, free: Boolean) {
+        if (appVisible || !screenOn || capturing) return
+        lastHeard = said
+        if (said == "bye" || said == "stop listening" || said == "stop listening leo") {
+            lastResult = "stopped follow-up listening"
+            stopFollowing()
+            return
+        }
+        if (LeoAccessibility.instance == null && QuickCommands.isScreenCommand(said)) {
+            lastResult = "needs Accessibility"
+            askForAccessibility()
+            return
+        }
+        var ok = try { QuickCommands.tryRun(this, said) } catch (_: Exception) { false }
+        if (ok) lastResult = "done on screen (follow-up)"
+        else if (free && sendToLeo(said)) { ok = true; lastResult = "follow-up handled by Leo in the background" }
+        else lastResult = "follow-up not understood"
+        if (ok) { buzz(); extendFollowing() }
         refresh()
     }
 
@@ -458,7 +703,8 @@ class LeoBubbleService : Service() {
         } else {
             pulse?.cancel(); pulse = null
             b.scaleX = 1f; b.scaleY = 1f
-            bg?.setStroke((2 * d).toInt(), 0xCCBAE6FD.toInt())
+            if (followOn) bg?.setStroke((3 * d).toInt(), 0xFF34D399.toInt())
+            else bg?.setStroke((2 * d).toInt(), 0xCCBAE6FD.toInt())
         }
     }
 
@@ -472,6 +718,9 @@ class LeoBubbleService : Service() {
     }
 
     private fun stopWake() {
+        if (capturing) { capturing = false; listeningUi(false); AudioDuck.release(this) }
+        main.removeCallbacks(endFollow)
+        following(false)
         voice?.stop()
         voice = null
     }

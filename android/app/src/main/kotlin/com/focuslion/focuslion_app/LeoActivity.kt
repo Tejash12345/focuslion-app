@@ -33,6 +33,8 @@ import java.util.Locale
 class LeoActivity : Activity() {
 
     companion object {
+        /** the live Leo window (kept alive in the background between uses) */
+        @Volatile var instance: LeoActivity? = null
         private const val URL = "https://new-app-ruddy-nine.vercel.app/leo"
         private const val HOST = "new-app-ruddy-nine.vercel.app"
         private const val REQ_PERMS = 5101
@@ -68,12 +70,21 @@ class LeoActivity : Activity() {
         web.addJavascriptInterface(LeoBridge(), "FLLeo")
         web.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String) {
+                pageReady = true
                 // per-page token: embedded iframes can't send phone commands
                 token = ByteArray(24).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
                 view.evaluateJavascript(
                     "window.__FLSpeakV2=true;window.__FLDeviceV1=true;window.__FLLeoStandalone=true;window.__FLDeviceToken=${JSONObject.quote(token)};",
                     null,
                 )
+            }
+            // the page's renderer crashed / was killed: close cleanly (next "Hey Leo" reopens)
+            override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
+                pageReady = false
+                if (instance === this@LeoActivity) instance = null
+                try { (view.parent as? android.view.ViewGroup)?.removeView(view); view.destroy() } catch (_: Exception) { }
+                finish()
+                return true
             }
             override fun shouldOverrideUrlLoading(view: WebView, req: WebResourceRequest): Boolean {
                 if (req.url.host == HOST) return false
@@ -110,24 +121,50 @@ class LeoActivity : Activity() {
             })
         }
         web.loadUrl(URL)
+        instance = this
     }
+
+    @Volatile private var pageReady = false
+
+    /**
+     * A command heard after "Hey Leo" while this window is in the background:
+     * run it here without bringing the window up (Leo answers out loud and
+     * acts). Returns false if the page isn't ready — then the window opens.
+     */
+    fun deliverInBackground(cmd: String, onFail: () -> Unit): Boolean {
+        if (!pageReady || isFinishing || isDestroyed) return false
+        runOnUiThread {
+            try {
+                // "1" only if the page really took the command; else open the window
+                web.evaluateJavascript(
+                    "(typeof window.__flWake=='function'&&(window.__flWake(${JSONObject.quote(cmd)}),1))||0",
+                ) { r -> if (r?.trim() != "1") onFail() }
+            } catch (_: Exception) { onFail() }
+        }
+        return true
+    }
+
+    private var resumed = false
 
     override fun onResume() {
         super.onResume()
+        resumed = true
         web.onResume()
         LeoBubbleService.markAppVisible(true) // hide the bubble + pause "Hey Leo" while Leo is open
         AudioDuck.hold(this) // pause YouTube/music while Leo listens — it isn't heard as commands
     }
 
     override fun onPause() {
-        web.onPause()
-        tts?.stop()
+        resumed = false
+        // NOT web.onPause(): the page keeps running in the background so later
+        // "Hey Leo" commands are handled without opening this window again
         AudioDuck.release(this) // Leo stepped aside: music/video carries on
         LeoBubbleService.markAppVisible(false)
         super.onPause()
     }
 
     override fun onDestroy() {
+        if (instance === this) instance = null
         tts?.shutdown()
         web.destroy()
         super.onDestroy()
@@ -173,6 +210,11 @@ class LeoActivity : Activity() {
         if (needs.isNotEmpty()) {
             cmd.put("token", token) // re-run this exact command once permission is granted
             pendingCmd = cmd.toString()
+            // asked from the background: come forward so the permission prompt shows
+            if (!resumed) try {
+                startActivity(Intent(this, LeoActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+            } catch (_: Exception) { }
             requestPermissions(needs.toTypedArray(), REQ_PERMS)
             return
         }
@@ -269,6 +311,11 @@ class LeoActivity : Activity() {
     // ---------- FLLeo: close the pop-up ----------
     inner class LeoBridge {
         @JavascriptInterface
-        fun postMessage(msg: String) = runOnUiThread { if (msg == "close") moveTaskToBack(true) }
+        fun postMessage(msg: String) = runOnUiThread {
+            when (msg) {
+                "close" -> moveTaskToBack(true)
+                "spoke_end" -> if (!resumed) LeoBubbleService.instance?.leoSpokeEnd()
+            }
+        }
     }
 }
