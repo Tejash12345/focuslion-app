@@ -70,10 +70,15 @@ object DeviceControl {
                 "bubble_start" -> bubbleStart(activity, args["wake"] == true)
                 "bubble_stop" -> { LeoBubbleService.stop(activity); ok("Leo bubble off") }
                 "take_route" -> { val r = LeoBubbleService.takeRoute(); if (r == null) fail("none") else ok(r) }
-                "take_wake" -> { val w = LeoBubbleService.takeWake(); if (w == null) fail("none") else ok(w) }
+                "take_wake" -> {
+                    // still hearing the command after "Hey Leo" -> the web app asks again shortly
+                    if (LeoBubbleService.instance?.isCapturing() == true) fail("wait")
+                    else { val w = LeoBubbleService.takeWake(); if (w == null) fail("none") else ok(w) }
+                }
                 "close_app" -> closeApp(activity, str(args, "name"))
                 "send_sms" -> sendSmsNow(activity, str(args, "who"), str(args, "text"))
                 "send_whatsapp" -> sendWhatsappNow(activity, str(args, "who"), str(args, "text"))
+                "send_bulk" -> sendBulk(activity, str(args, "app"), args["who"], str(args, "text"))
                 "schedule_message" -> scheduleMessage(activity, str(args, "app"), str(args, "who"), str(args, "text"), str(args, "at"))
                 "scheduled_list" -> scheduledList(activity)
                 "scheduled_cancel" -> ok("Cancelled ${Messaging.cancel(activity, str(args, "query"))} scheduled message(s)")
@@ -533,6 +538,28 @@ object DeviceControl {
         }
         if (!Messaging.whatsappAutoSend(activity, r.second, text)) return fail("WhatsApp isn't installed")
         return ok("Sending your WhatsApp to ${r.first}")
+    }
+
+    /** One message to up to 20 named people (SMS or WhatsApp). */
+    private fun sendBulk(activity: Activity, appRaw: String, whoRaw: Any?, text: String): Map<String, Any?> {
+        if (text.isBlank()) return fail("What should the message say?")
+        val names = when (whoRaw) {
+            is List<*> -> whoRaw.map { it.toString() }
+            else -> whoRaw?.toString()?.split(",", ";")?.map { it.trim() } ?: emptyList()
+        }.filter { it.isNotBlank() }.distinct()
+        if (names.isEmpty()) return fail("Who should I send it to?")
+        if (names.size > 20) return fail("I can send to up to 20 people at once — name fewer people")
+        val app = if (appRaw.lowercase().contains("sms") || appRaw.lowercase().contains("text")) "sms" else "whatsapp"
+        if (app == "sms" && !hasSmsPermission(activity)) return fail("Allow SMS for FocusLion so I can send it")
+        if (app == "whatsapp" && LeoAccessibility.instance == null) return needAccessibility(activity)
+        val found = ArrayList<Pair<String, String>>()
+        val missing = ArrayList<String>()
+        for (n in names) { val r = resolve(activity, n); if (r != null) found += r else missing += n.substringBefore('|') }
+        if (found.isEmpty()) return fail("I couldn't find ${missing.joinToString()} in your contacts")
+        Messaging.bulk(activity, app, found.distinctBy { it.second.filter { c -> c.isDigit() }.takeLast(10) }, text)
+        val who = found.joinToString { it.first }
+        return ok("Sending ${if (app == "sms") "SMS" else "WhatsApp"} to $who" +
+            (if (missing.isNotEmpty()) " (couldn't find ${missing.joinToString()})" else ""))
     }
 
     /** at = "YYYY-MM-DDTHH:mm" in local time. */

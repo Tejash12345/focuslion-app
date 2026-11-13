@@ -263,15 +263,19 @@ class LeoBubbleService : Service() {
         }
     }
 
-    /** Bring FocusLion up with Leo open (and listening, or running `rest`). */
+    /** Bring up ONLY Leo (the pop-up window), listening or running `rest`. */
     private fun openLeo(rest: String) {
-        val now = System.currentTimeMillis()
-        if (now - lastFire < 2500) return
-        lastFire = now
         pendingWake = rest
-        // open ONLY Leo (the pop-up window), not the whole FocusLion app
+        launchLeo()
+    }
+
+    /** Show the Leo pop-up right now (it stays alive between uses, so this is instant). */
+    private fun launchLeo() {
+        val now = System.currentTimeMillis()
+        if (now - lastFire < 1200) return
+        lastFire = now
         val i = Intent(this, LeoActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
         try { startActivity(i) } catch (_: Exception) {}
     }
 
@@ -349,33 +353,44 @@ class LeoBubbleService : Service() {
     @Volatile private var capturing = false
     private var cmdSpeech: SpeechService? = null
 
+    /** True while the command after "Hey Leo" is still being heard. */
+    fun isCapturing() = capturing
+
     /**
-     * "Hey Leo, open WhatsApp": the wake recognizer only knows the wake words,
-     * so we switch to a free-form offline recognizer for a few seconds, then
-     * open Leo with whatever was said ("" = Leo starts listening himself).
+     * "Hey Leo, open WhatsApp": Leo's window opens INSTANTLY (feedback), while
+     * a free-form offline recognizer keeps listening for the command. When it
+     * is done we hand the text over ("" = no command, Leo listens himself).
+     * If nothing is said within ~1.6 s we hand over at once — no waiting.
      */
     private fun captureCommand() {
         if (capturing) return
         val m = model ?: run { openLeo(""); return }
         capturing = true
+        pendingWake = null
         stopWake()
         buzz()
+        launchLeo()
         var done = false
+        var spoke = false
         fun finish(text: String) {
             if (done) return
             done = true
             main.post {
                 cmdSpeech?.let { try { it.stop(); it.shutdown() } catch (_: Exception) {} }
                 cmdSpeech = null
+                pendingWake = text.replace(Regex("^(hey|hi|okay|ok|hello)?\\s*leo\\b[ ,]*"), "").trim()
                 capturing = false
-                openLeo(text.replace(Regex("^(hey|hi|okay|ok|hello)?\\s*leo\\b[ ,]*"), "").trim())
+                refresh()
             }
         }
         try {
             val rec = Recognizer(m, 16000f)
             val s = SpeechService(rec, 16000f)
             val l = object : RecognitionListener {
-                override fun onPartialResult(h: String?) {}
+                override fun onPartialResult(h: String?) {
+                    val p = try { JSONObject(h ?: "{}").optString("partial") } catch (_: Exception) { "" }
+                    if (p.isNotBlank() && p.trim() !in setOf("leo", "hey leo", "the", "a", "huh")) spoke = true
+                }
                 override fun onResult(h: String?) {
                     val t = try { JSONObject(h ?: "{}").optString("text") } catch (_: Exception) { "" }
                     if (t.isNotBlank() && t.trim() !in setOf("leo", "hey leo", "the", "a", "huh")) finish(t)
@@ -386,13 +401,14 @@ class LeoBubbleService : Service() {
                 override fun onError(e: Exception?) { finish("") }
                 override fun onTimeout() { finish("") }
             }
-            s.startListening(l, 5000) // up to 5 s for the command
+            s.startListening(l, 6000)
             cmdSpeech = s
-            // nobody spoke after "Hey Leo" -> just open Leo listening
-            main.postDelayed({ if (!done) finish("") }, 5500)
+            // silence right after "Hey Leo" -> hand over immediately (Leo listens himself)
+            main.postDelayed({ if (!done && !spoke) finish("") }, 1600)
+            main.postDelayed({ if (!done) finish("") }, 6500)
         } catch (_: Exception) {
             capturing = false
-            openLeo("")
+            pendingWake = ""
         }
     }
 

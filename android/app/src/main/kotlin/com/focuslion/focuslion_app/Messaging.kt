@@ -60,6 +60,25 @@ object Messaging {
         return true
     }
 
+    // ---------- bulk: one message to several people ----------
+    /**
+     * SMS go out back-to-back; WhatsApp is done one chat at a time (open the
+     * chat, the accessibility service taps Send, wait, next) so it looks like
+     * a person sending — blasting many chats instantly gets numbers banned.
+     */
+    fun bulk(ctx: Context, app: String, people: List<Pair<String, String>>, text: String) {
+        val main = android.os.Handler(android.os.Looper.getMainLooper())
+        if (app == "sms") {
+            people.forEachIndexed { i, p -> main.postDelayed({ try { sendSms(ctx, p.second, text) } catch (_: Exception) {} }, i * 1200L) }
+            main.postDelayed({ notify(ctx, 99, "✅ Leo sent your SMS to ${people.size} people", text, null) }, people.size * 1200L + 500)
+            return
+        }
+        people.forEachIndexed { i, p ->
+            main.postDelayed({ try { whatsappAutoSend(ctx, p.second, text) } catch (_: Exception) {} }, i * 6000L)
+        }
+        main.postDelayed({ notify(ctx, 98, "✅ Leo sent your WhatsApp to ${people.size} people", text, null) }, people.size * 6000L)
+    }
+
     // ---------- scheduling ----------
     private fun load(ctx: Context): JSONArray =
         try { JSONArray(ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, "[]")) } catch (_: Exception) { JSONArray() }

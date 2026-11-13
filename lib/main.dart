@@ -281,10 +281,10 @@ Future<void> _handleDevice(String raw) async {
     // instant calling (confirmation off) needs the Phone permission — ask the first time
     if (a == 'call' && cmd['direct'] == true) await Permission.phone.request();
     // sending SMS (now or scheduled) needs the SMS permission — ask the first time
-    if (a == 'send_sms' || (a == 'schedule_message' && (cmd['app']?.toString().toLowerCase().contains('sms') ?? false))) {
+    if (a == 'send_sms' || ((a == 'schedule_message' || a == 'send_bulk') && (cmd['app']?.toString().toLowerCase().contains('sms') ?? false))) {
       await Permission.sms.request();
     }
-    if ((a == 'call' || a == 'sms' || a == 'whatsapp' || a == 'send_sms' || a == 'send_whatsapp' || a == 'schedule_message') && RegExp(r'[A-Za-zఀ-౿ऀ-ॿ]').hasMatch(who)) {
+    if ((a == 'call' || a == 'sms' || a == 'whatsapp' || a == 'send_sms' || a == 'send_whatsapp' || a == 'schedule_message' || a == 'send_bulk') && RegExp(r'[A-Za-zఀ-౿ऀ-ॿ]').hasMatch(who)) {
       await Permission.contacts.request();
     }
     final method = a == 'listen' ? 'deviceListen' : a == 'wake_start' ? 'wakeStart' : a == 'wake_stop' ? 'wakeStop' : 'device';

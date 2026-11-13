@@ -128,8 +128,10 @@ class LeoActivity : Activity() {
         super.onDestroy()
     }
 
+    // Keep Leo's window alive in the background so the next "Hey Leo" opens
+    // instantly (no reload); it just steps aside and you're back in your app.
     @Deprecated("Deprecated in Java")
-    override fun onBackPressed() { finish() }
+    override fun onBackPressed() { moveTaskToBack(true) }
 
     private fun js(code: String) = runOnUiThread { try { web.evaluateJavascript(code, null) } catch (_: Exception) {} }
 
@@ -153,11 +155,11 @@ class LeoActivity : Activity() {
         // contacts / SMS permissions first (then the command runs automatically)
         val who = cmd.optString("who")
         val needs = ArrayList<String>()
-        if (a in setOf("call", "sms", "whatsapp", "send_sms", "send_whatsapp", "schedule_message") && who.any { it.isLetter() } &&
+        if (a in setOf("call", "sms", "whatsapp", "send_sms", "send_whatsapp", "schedule_message", "send_bulk") && (who.any { it.isLetter() } || a == "send_bulk") &&
             checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) needs += Manifest.permission.READ_CONTACTS
         if (a == "call" && cmd.optBoolean("direct") &&
             checkSelfPermission(Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) needs += Manifest.permission.CALL_PHONE
-        if ((a == "send_sms" || (a == "schedule_message" && cmd.optString("app").contains("sms", true))) &&
+        if ((a == "send_sms" || ((a == "schedule_message" || a == "send_bulk") && cmd.optString("app").contains("sms", true))) &&
             checkSelfPermission(Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) needs += Manifest.permission.SEND_SMS
         if (needs.isNotEmpty()) {
             cmd.put("token", token) // re-run this exact command once permission is granted
@@ -239,6 +241,6 @@ class LeoActivity : Activity() {
     // ---------- FLLeo: close the pop-up ----------
     inner class LeoBridge {
         @JavascriptInterface
-        fun postMessage(msg: String) = runOnUiThread { if (msg == "close") finish() }
+        fun postMessage(msg: String) = runOnUiThread { if (msg == "close") moveTaskToBack(true) }
     }
 }
