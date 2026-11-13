@@ -37,7 +37,7 @@ class LeoActivity : Activity() {
         private const val HOST = "new-app-ruddy-nine.vercel.app"
         private const val REQ_PERMS = 5101
         private const val REQ_FILE = 5102
-        private val ON_SCREEN = setOf("scroll", "tap", "type", "swipe", "search_app", "home", "back", "recents", "notifications", "quick_settings", "screenshot", "lock", "power_menu")
+        private val ON_SCREEN = setOf("scroll", "stop_scroll", "tap", "type", "swipe", "search_app", "home", "back", "recents", "notifications", "quick_settings", "screenshot", "lock", "power_menu")
         private val LEAVES = setOf("open_app", "settings", "youtube", "music", "maps", "web", "url", "camera", "video", "call", "sms",
             "whatsapp", "email", "calendar", "share", "send_whatsapp", "send_bulk", "close_app")
     }

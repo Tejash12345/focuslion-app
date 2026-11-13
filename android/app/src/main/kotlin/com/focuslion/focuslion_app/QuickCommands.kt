@@ -22,14 +22,21 @@ object QuickCommands {
         val words = t.split(" ")
 
         // ---- scrolling (forgiving: "scroll", "scroll down a bit", "school done"…) ----
-        val isScroll = (words[0] == "scroll" && words.size <= 5 && words.drop(1).all { it in SCROLL_WORDS }) ||
-            Regex("^(go|move|page|swipe) (down|up)( more| to top)?$").matches(t) || t == "next page" || t == "page down" || t == "page up"
-        if (isScroll) {
-            val up = words.any { it == "up" || it == "top" || it == "upwards" || it == "back" }
-            // a recognised command never falls back to Leo's window, even if this screen can't scroll
-            a?.scroll(!up)
-            return a != null
+        // ---- stop (auto-scroll first; otherwise "stop" pauses media below) ----
+        val wantsStop = words.any { it == "stop" || it == "enough" || it == "halt" } && words.size <= 4
+        if (wantsStop && (a?.stopAutoScroll() == true || words.any { it == "scrolling" || it == "scroll" })) return a != null
+
+        // ---- scrolling, understood by meaning: direction, amount, speed, repeats ----
+        parseScroll(words)?.let { plan ->
+            val svc = a ?: return false
+            runScroll(svc, plan)
+            return true // a recognised command never falls back to Leo's window
         }
+        if (t == "next page" || t == "page down") { a?.scrollBy(false, 0.75f, 300); return a != null }
+        if (t == "page up") { a?.scrollBy(true, 0.75f, 300); return a != null }
+
+        // ---- volume (any app) ----
+        volume(ctx, words)?.let { return it }
         // ---- reels / shorts / videos: next & previous ----
         when (t) {
             "next", "next video", "next reel", "next short", "next one", "next song", "go next", "play next video", "play next" -> { a?.scroll(true); return a != null }
@@ -106,12 +113,91 @@ object QuickCommands {
                 "notifications", "accessibility", "developer options", "about phone", "airplane mode", "hotspot", "vpn", "nfc"))
             settingsIntent(thing) else null
 
-    private val SCROLL_WORDS = setOf("down", "up", "more", "to", "top", "bottom", "back", "upwards", "screen", "page", "slowly", "once", "twice")
+    // ---------- scrolling by meaning ----------
+    private data class ScrollPlan(
+        val up: Boolean, val fraction: Float, val ms: Long, val repeat: Int,
+        val toEnd: Boolean, val auto: Boolean, val autoInterval: Long,
+    )
+
+    /** Words that may appear in a scroll command, in any order. Anything else -> not a scroll command. */
+    private val SCROLL_OK = setOf(
+        "scroll", "scrolls", "swipe", "move", "go", "page", "read", "reading",
+        "down", "up", "upwards", "downwards", "back", "top", "bottom", "end", "start", "beginning", "more",
+        "to", "the", "of", "on", "in", "it", "this", "list", "feed", "screen", "page", "all", "way", "till", "until", "so", "i", "and",
+        "slowly", "slow", "slower", "gently", "gentle", "smoothly", "smooth", "little", "bit", "slightly", "small", "tiny",
+        "lot", "fast", "faster", "quickly", "quick", "big", "full", "whole", "half", "much",
+        "keep", "keeps", "continuously", "continue", "auto", "automatically", "mode",
+        "once", "twice", "thrice", "times", "time", "one", "two", "three", "four", "five", "2", "3", "4", "5",
+    )
+    private val NUMBERS = mapOf("once" to 1, "one" to 1, "twice" to 2, "two" to 2, "2" to 2, "thrice" to 3, "three" to 3, "3" to 3,
+        "four" to 4, "4" to 4, "five" to 5, "5" to 5)
+
+    private fun parseScroll(w: List<String>): ScrollPlan? {
+        val dirWords = setOf("up", "down", "top", "bottom", "upwards", "downwards", "end", "beginning")
+        val hasVerb = "scroll" in w || "scrolls" in w ||
+            (w.firstOrNull() in setOf("go", "move", "swipe", "page") && w.any { it in dirWords })
+        if (!hasVerb || !w.all { it in SCROLL_OK }) return null
+        val up = w.any { it == "up" || it == "upwards" || it == "top" || it == "beginning" || it == "start" || (it == "back" && "down" !in w) }
+        val toEnd = w.any { it == "top" || it == "bottom" || it == "end" || it == "beginning" } || ("all" in w && "way" in w)
+        val slow = w.any { it in setOf("slowly", "slow", "slower", "gently", "gentle", "smoothly", "smooth", "reading", "read") }
+        val small = w.any { it in setOf("little", "bit", "slightly", "small", "tiny") }
+        val big = w.any { it in setOf("lot", "fast", "faster", "quickly", "quick", "big", "full", "whole", "much") }
+        val repeat = w.firstNotNullOfOrNull { NUMBERS[it] } ?: 1
+        val keep = w.any { it in setOf("keep", "keeps", "continuously", "continue", "auto", "automatically", "mode") }
+        // "slowly scroll" (no amount/count) reads like a teleprompter: gentle auto-scroll
+        val auto = !toEnd && (keep || (slow && !small && repeat == 1))
+        val fraction = when { small -> 0.18f; big -> 0.75f; else -> 0.45f }
+        val ms = when { slow -> 900L; big -> 250L; else -> 400L }
+        return ScrollPlan(up, fraction, ms, repeat, toEnd, auto, if (slow) 2600L else 1600L)
+    }
+
+    private fun runScroll(svc: LeoAccessibility, p: ScrollPlan) {
+        svc.stopAutoScroll()
+        when {
+            p.auto -> svc.startAutoScroll(p.up, p.autoInterval, if (p.fraction < 0.3f) 0.18f else 0.28f)
+            p.toEnd -> repeatScroll(svc, p.up, 0.8f, 220L, 10, 380L) // "to the top/bottom"
+            else -> repeatScroll(svc, p.up, p.fraction, p.ms, p.repeat, p.ms + 250L)
+        }
+    }
+
+    private fun repeatScroll(svc: LeoAccessibility, up: Boolean, fraction: Float, ms: Long, times: Int, gap: Long) {
+        val h = android.os.Handler(android.os.Looper.getMainLooper())
+        for (i in 0 until times.coerceIn(1, 10)) {
+            h.postDelayed({
+                // gesture first (smooth, any app); accessibility scroll if gestures are blocked
+                if (!svc.scrollBy(up, fraction, ms) && i == 0) svc.scroll(!up)
+            }, i * gap)
+        }
+    }
+
+    // ---------- volume ----------
+    private fun volume(ctx: Context, w: List<String>): Boolean? {
+        val louder = setOf("louder", "increase", "raise", "higher")
+        val softer = setOf("quieter", "softer", "lower", "decrease", "reduce")
+        val isVolume = "volume" in w || w.any { it in louder || it in softer } || w == listOf("mute") || w == listOf("unmute") ||
+            (w.firstOrNull() == "mute" && w.size <= 3) || (w.firstOrNull() == "unmute" && w.size <= 3)
+        if (!isVolume || w.size > 6) return null
+        if (w.any { it == "what" || it == "how" || it == "brightness" }) return null // questions / other settings -> Leo
+        val am = ctx.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+        val s = android.media.AudioManager.STREAM_MUSIC
+        val flags = android.media.AudioManager.FLAG_SHOW_UI
+        val steps = if (w.any { it == "lot" || it == "much" }) 4 else 2
+        try {
+            when {
+                "unmute" in w -> am.adjustStreamVolume(s, android.media.AudioManager.ADJUST_UNMUTE, flags)
+                "mute" in w -> am.adjustStreamVolume(s, android.media.AudioManager.ADJUST_MUTE, flags)
+                w.any { it == "max" || it == "maximum" || it == "full" } -> am.setStreamVolume(s, am.getStreamMaxVolume(s), flags)
+                w.any { it in softer || it == "down" } -> repeat(steps) { am.adjustStreamVolume(s, android.media.AudioManager.ADJUST_LOWER, flags) }
+                else -> repeat(steps) { am.adjustStreamVolume(s, android.media.AudioManager.ADJUST_RAISE, flags) }
+            }
+        } catch (_: Exception) { return false }
+        return true
+    }
 
     /** Filler / politeness words people (and the offline recognizer) add. */
     private val FILLER = setOf(
         "please", "leo", "hey", "hi", "hello", "ok", "okay", "now", "the", "a", "an", "uh", "um", "umm", "ah", "er",
-        "just", "can", "could", "would", "will", "you", "u", "then", "little", "bit", "me", "quickly", "again", "pls",
+        "just", "can", "could", "would", "will", "you", "u", "then", "me", "again", "pls",
     )
 
     /** Words the small offline model commonly mishears, mapped back. */

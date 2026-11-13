@@ -67,7 +67,17 @@ object DeviceControl {
                 "location" -> location(activity)
                 "agenda" -> agenda(activity, int(args, "days"))
                 // act on the app underneath (Leo's window steps aside first — see LeoActivity)
-                "scroll" -> onScreen(activity, "Scrolled") { it.scroll(str(args, "dir") != "up") }
+                // AI-chosen details (amount / speed / times / auto) go through the same scroll engine
+                "scroll" -> onScreen(activity, "Scrolling") {
+                    val phrase = listOf("scroll", str(args, "dir").ifEmpty { "down" },
+                        when (str(args, "amount")) { "little" -> "a little"; "lot" -> "a lot"; "to end" -> if (str(args, "dir") == "up") "to the top" else "to the bottom"; else -> "" },
+                        when (str(args, "speed")) { "slow" -> "slowly"; "fast" -> "fast"; else -> "" },
+                        if (args["auto"] == true) "keep" else "",
+                        int(args, "times").takeIf { it in 2..5 }?.let { "$it times" } ?: "",
+                    ).filter { it.isNotBlank() }.joinToString(" ")
+                    QuickCommands.tryRun(activity, phrase)
+                }
+                "stop_scroll" -> onScreen(activity, "Stopped scrolling") { it.stopAutoScroll(); true }
                 "tap" -> onScreen(activity, "Tapped ${str(args, "text")}") { it.tapText(str(args, "text")) }
                 "type" -> onScreen(activity, "Typed it") { it.typeText(str(args, "text")) }
                 "swipe" -> onScreen(activity, "Swiped") { it.swipeSideways(str(args, "dir") != "right") }

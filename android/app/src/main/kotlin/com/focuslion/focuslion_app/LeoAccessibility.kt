@@ -176,6 +176,52 @@ class LeoAccessibility : AccessibilityService() {
         return dispatchGesture(g, null, null)
     }
 
+    // ---------- smooth, human-like scrolling (any app) ----------
+
+    /**
+     * Scroll by a fraction of the screen with a finger-like drag. `fraction`
+     * 0.15 = a little, 0.45 = normal, 0.75 = a lot; slower `ms` = smoother.
+     */
+    fun scrollBy(up: Boolean, fraction: Float, ms: Long): Boolean {
+        if (appRoot() == null) return false
+        val dm = resources.displayMetrics
+        val x = dm.widthPixels / 2f
+        val span = dm.heightPixels * fraction.coerceIn(0.08f, 0.8f)
+        val mid = dm.heightPixels * 0.55f
+        val (y1, y2) = if (!up) (mid + span / 2) to (mid - span / 2) else (mid - span / 2) to (mid + span / 2)
+        val path = android.graphics.Path().apply { moveTo(x, y1); lineTo(x, y2) }
+        val g = android.accessibilityservice.GestureDescription.Builder()
+            .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0, ms.coerceIn(120, 2000)))
+            .build()
+        return dispatchGesture(g, null, null)
+    }
+
+    private val scrollLoop = android.os.Handler(android.os.Looper.getMainLooper())
+    @Volatile var autoScrolling = false
+        private set
+
+    /** Keep scrolling gently (reading mode) until stopAutoScroll() — max 15 minutes. */
+    fun startAutoScroll(up: Boolean, intervalMs: Long, fraction: Float) {
+        stopAutoScroll()
+        autoScrolling = true
+        val until = System.currentTimeMillis() + 15 * 60_000
+        val tick = object : Runnable {
+            override fun run() {
+                if (!autoScrolling || System.currentTimeMillis() > until) { autoScrolling = false; return }
+                scrollBy(up, fraction, (intervalMs * 0.6).toLong())
+                scrollLoop.postDelayed(this, intervalMs)
+            }
+        }
+        scrollLoop.post(tick)
+    }
+
+    fun stopAutoScroll(): Boolean {
+        val was = autoScrolling
+        autoScrolling = false
+        scrollLoop.removeCallbacksAndMessages(null)
+        return was
+    }
+
     /** Swipe left/right (stories, tabs, photo galleries). */
     fun swipeSideways(toLeft: Boolean): Boolean {
         val dm = resources.displayMetrics
