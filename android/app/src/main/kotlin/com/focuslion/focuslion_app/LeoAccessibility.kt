@@ -111,22 +111,28 @@ class LeoAccessibility : AccessibilityService() {
 
     // ---------- hands on the current screen (the app the user is looking at) ----------
 
-    /** Scroll the main list/page of the current app. */
+    /** Scroll the main list/page of the current app (vertical lists first). */
     fun scroll(forward: Boolean): Boolean {
         val root = rootInActiveWindow ?: return false
         if (root.packageName?.toString() == packageName) return false // never scroll Leo himself
-        val target = biggestScrollable(root)
+        // prefer a node that can scroll DOWN/UP (vertical) over tab pagers
+        if (Build.VERSION.SDK_INT >= 23) {
+            val dir = if (forward) AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN else AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP
+            val v = biggestScrollable(root, { n -> n.actionList.any { it.id == dir.id } })
+            if (v != null && v.performAction(dir.id)) return true
+        }
+        val target = biggestScrollable(root, { true })
         if (target != null && target.performAction(
                 if (forward) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)) return true
         return swipe(forward) // apps without accessible scroll views
     }
 
-    private fun biggestScrollable(n: AccessibilityNodeInfo?, depth: Int = 0): AccessibilityNodeInfo? {
+    private fun biggestScrollable(n: AccessibilityNodeInfo?, ok: (AccessibilityNodeInfo) -> Boolean, depth: Int = 0): AccessibilityNodeInfo? {
         if (n == null || depth > 40) return null
-        var best: AccessibilityNodeInfo? = if (n.isScrollable && n.isVisibleToUser) n else null
+        var best: AccessibilityNodeInfo? = if (n.isScrollable && n.isVisibleToUser && ok(n)) n else null
         var bestArea = best?.let { area(it) } ?: 0
         for (i in 0 until n.childCount) {
-            val c = biggestScrollable(n.getChild(i), depth + 1) ?: continue
+            val c = biggestScrollable(n.getChild(i), ok, depth + 1) ?: continue
             val a = area(c)
             if (a > bestArea) { best = c; bestArea = a }
         }
@@ -137,7 +143,7 @@ class LeoAccessibility : AccessibilityService() {
         val r = android.graphics.Rect(); n.getBoundsInScreen(r); return r.width() * r.height()
     }
 
-    /** A finger swipe up/down the middle of the screen. */
+    /** A finger swipe up/down the middle of the screen (needs canPerformGestures). */
     private fun swipe(forward: Boolean): Boolean {
         val dm = resources.displayMetrics
         val x = dm.widthPixels / 2f
@@ -149,30 +155,40 @@ class LeoAccessibility : AccessibilityService() {
         return dispatchGesture(g, null, null)
     }
 
-    /** Tap the visible button/item whose text (or label) matches — "tap Storage". */
+    /** Buttons Leo never taps by voice — losing data or money must stay a human tap. */
+    private val DANGER = Regex("(?i)\\b(delete|remove|uninstall|pay|payment|buy|purchase|confirm|transfer|send money|reset|erase|clear all|clear data|format|log ?out|sign ?out|block|report|unsubscribe|deactivate)\\b")
+
+    /**
+     * Tap the visible item whose text is exactly what the user said ("tap
+     * Storage"), or the single item containing it as a whole word. Never taps
+     * dangerous buttons (delete, pay, uninstall, …).
+     */
     fun tapText(label: String): Boolean {
         val root = rootInActiveWindow ?: return false
         if (root.packageName?.toString() == packageName) return false
         val q = label.trim().lowercase()
-        if (q.isEmpty()) return false
+        if (q.length < 2) return false
         val hits = root.findAccessibilityNodeInfosByText(label.trim()).filter { it.isVisibleToUser }
-        // prefer an exact match, then the shortest label that contains it
-        val node = hits.minByOrNull {
-            val t = (it.text ?: it.contentDescription)?.toString()?.trim()?.lowercase().orEmpty()
-            if (t == q) 0 else if (t.startsWith(q)) 1 + t.length else 1000 + t.length
-        } ?: return false
+        fun text(n: AccessibilityNodeInfo) = (n.text ?: n.contentDescription)?.toString()?.trim()?.lowercase().orEmpty()
+        val exact = hits.filter { text(it) == q }
+        val word = hits.filter { Regex("(^|\\W)" + Regex.escape(q) + "(\\W|$)").containsMatchIn(text(it)) }
+        val node = exact.firstOrNull() ?: word.singleOrNull() ?: return false
+        if (DANGER.containsMatchIn(text(node))) return false
         var c: AccessibilityNodeInfo? = node
-        while (c != null && !c.isClickable) c = c.parent
-        return (c ?: node).performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        var hops = 0
+        while (c != null && !c.isClickable && hops < 3) { c = c.parent; hops++ }
+        val target = if (c?.isClickable == true) c else node
+        return target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
     }
 
-    /** Type into the focused text box of the current app — "type hello". */
+    /** Type into the focused text box of the current app — "type hello". Never into passwords. */
     fun typeText(text: String): Boolean {
         val root = rootInActiveWindow ?: return false
         if (root.packageName?.toString() == packageName) return false
         val field = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: firstEditable(root) ?: return false
-        val hint = Build.VERSION.SDK_INT >= 26 && field.isShowingHintText
-        val existing = field.text?.toString().orEmpty().takeIf { field.isEditable && !hint } ?: ""
+        if (field.isPassword) return false
+        // append to what's already typed (Android 8+ can tell real text from the hint)
+        val existing = if (Build.VERSION.SDK_INT >= 26 && field.isEditable && !field.isShowingHintText) field.text?.toString().orEmpty() else ""
         val args = android.os.Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, (existing + (if (existing.isEmpty()) "" else " ") + text).trim())
         }

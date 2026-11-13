@@ -160,6 +160,10 @@ class LeoActivity : Activity() {
         val needs = ArrayList<String>()
         if (a in setOf("call", "sms", "whatsapp", "send_sms", "send_whatsapp", "schedule_message", "send_bulk") && (who.any { it.isLetter() } || a == "send_bulk") &&
             checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) needs += Manifest.permission.READ_CONTACTS
+        if (a == "location" && checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED)
+            needs += Manifest.permission.ACCESS_COARSE_LOCATION
+        if (a == "agenda" && checkSelfPermission(Manifest.permission.READ_CALENDAR) != PackageManager.PERMISSION_GRANTED)
+            needs += Manifest.permission.READ_CALENDAR
         if (a == "call" && cmd.optBoolean("direct") &&
             checkSelfPermission(Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) needs += Manifest.permission.CALL_PHONE
         if ((a == "send_sms" || ((a == "schedule_message" || a == "send_bulk") && cmd.optString("app").contains("sms", true))) &&
@@ -182,9 +186,18 @@ class LeoActivity : Activity() {
                 finish()
             }
             in ON_SCREEN -> {
-                // scroll / tap / type act on the app underneath: step aside first
+                // scroll / tap / type act on the app underneath: step aside first,
+                // wait until that app is really in front, then act and report back
                 moveTaskToBack(true)
-                reply(id, DeviceControl.handle(this, toMap(cmd)))
+                val args = toMap(cmd)
+                fun attempt(left: Int) {
+                    web.postDelayed({
+                        val front = LeoAccessibility.instance?.rootInActiveWindow?.packageName?.toString()
+                        if (front == packageName && left > 0) attempt(left - 1)
+                        else reply(id, DeviceControl.handle(this, args))
+                    }, 350)
+                }
+                attempt(6)
             }
             else -> {
                 val res = DeviceControl.handle(this, toMap(cmd))

@@ -383,7 +383,8 @@ class LeoBubbleService : Service() {
                 capturing = false
                 // screen commands ("scroll down", "tap storage", "go back"…) run right
                 // here on the app you're using — no Leo window popping up over it
-                if (cmd.isNotEmpty() && QuickCommands.tryRun(this, cmd)) {
+                val handled = cmd.isNotEmpty() && try { QuickCommands.tryRun(this, cmd) } catch (_: Exception) { false }
+                if (handled) {
                     buzz()
                     refresh()
                     return@post
@@ -417,8 +418,12 @@ class LeoBubbleService : Service() {
             main.postDelayed({ if (!done && !spoke) finish("") }, 1600)
             main.postDelayed({ if (!done) finish("") }, 6500)
         } catch (_: Exception) {
+            // couldn't start the command recognizer: just open Leo listening
             capturing = false
+            listeningUi(false)
             pendingWake = ""
+            launchLeo()
+            refresh()
         }
     }
 

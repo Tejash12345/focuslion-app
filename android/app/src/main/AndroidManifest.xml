@@ -50,6 +50,10 @@
     <uses-permission android:name="android.permission.SEND_SMS" />
     <!-- "call Ravi" places the call directly when the user turned confirmation off -->
     <uses-permission android:name="android.permission.CALL_PHONE" />
+    <!-- "what's the weather?" (approximate location only) -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- "what's on my calendar today?" (read only) -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
     <!-- scheduled messages fire on the exact minute (user grants "Alarms & reminders") -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <!-- floating Leo bubble + offline "Hey Leo" while FocusLion is closed -->

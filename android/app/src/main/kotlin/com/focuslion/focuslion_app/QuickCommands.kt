@@ -39,42 +39,59 @@ object QuickCommands {
             Regex("^lock( (the|my) (phone|screen))?$").matches(t) -> return a?.global("lock") ?: false
             t == "send" || t == "tap send" || t == "send it" -> return a?.tapText("Send") ?: false
         }
-        // ---- typing into the focused box ----
-        Regex("^(type|write|enter) (.+)$").find(t)?.let { m ->
-            // keep the user's original words (case/punctuation) for typing
-            val original = Regex("(?i)^\\s*(hey |hi |ok )?(leo[, ]*)?(type|write|enter)\\s+").replace(raw.trim(), "")
-            return a?.typeText(original.ifBlank { m.groupValues[2] }) ?: false
+        // ---- typing into the focused box: only "type …" ----
+        Regex("^type (.+)$").find(t)?.let { m ->
+            // keep the user's words, minus the wake/filler words
+            val original = Regex("(?i)^\\s*(please |hey |hi |ok |okay )*(leo[, ]*)?(please )?type\\s+").replace(raw.trim(), "")
+            return a?.typeText(original.ifBlank { m.groupValues[1] }) ?: false
         }
-        // ---- tap something on screen ----
-        Regex("^(tap|click|press|select|choose|hit)( on)? (.+)$").find(t)?.let { m ->
+        // ---- tap something on screen (exact text; never dangerous buttons) ----
+        Regex("^(tap|click|press|hit)( on)? (.+)$").find(t)?.let { m ->
             return a?.tapText(m.groupValues[3]) ?: false
         }
-        // ---- open: something on this screen, else a settings page, else an app ----
-        Regex("^(open|go to|show)( my)? (.+?)( settings| setting| app)?$").find(t)?.let { m ->
+        // ---- open: an exact on-screen item, a settings page, or an app ----
+        Regex("^(open|go to)( my)? (.+?)( settings| setting| app)?$").find(t)?.let { m ->
             val thing = m.groupValues[3].trim()
             val saidSettings = m.groupValues[4].contains("setting")
-            if (!saidSettings && a?.tapText(thing) == true) return true
-            settingsIntent(thing)?.let { return start(ctx, it) }
-            if (saidSettings && thing == "settings") return start(ctx, Intent(Settings.ACTION_SETTINGS))
-            return openApp(ctx, thing)
+            // too vague, or something Leo himself handles (his window answers these)
+            if (thing.length < 3 || thing in VAGUE || LEO_OWNS.containsMatchIn(thing)) return false
+            if (saidSettings) {
+                if (thing == "settings") return start(ctx, Intent(Settings.ACTION_SETTINGS))
+                settingsIntent(thing)?.let { return start(ctx, it) }
+                return false
+            }
+            if (thing == "settings") return start(ctx, Intent(Settings.ACTION_SETTINGS))
+            if (a?.tapText(thing) == true) return true // e.g. "open Storage" inside Settings
+            if (openApp(ctx, thing)) return true
+            exactSettingsIntent(thing)?.let { return start(ctx, it) }
+            return false
         }
         return false
     }
+
+    private val VAGUE = setOf("it", "this", "that", "me", "them", "something", "anything", "the app", "app")
+    /** Leo's own features — never hijack these into a random app or settings page. */
+    private val LEO_OWNS = Regex("\\b(tasks?|messages?|notes?|timetable|timer|focus|planner|calendar|agenda|weather|news|screen ?time|flashcards?|quiz|study|exam|mission|leo|focuslion)\\b")
+
+    /** Settings page only when the name IS a settings page ("storage", "wi-fi"…). */
+    private fun exactSettingsIntent(thing: String): Intent? =
+        if (thing in setOf("storage", "battery", "display", "sound", "wifi", "wi fi", "bluetooth", "location", "apps",
+                "notifications", "accessibility", "developer options", "about phone", "airplane mode", "hotspot", "vpn", "nfc"))
+            settingsIntent(thing) else null
 
     private fun start(ctx: Context, i: Intent): Boolean = try {
         ctx.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); true
     } catch (_: Exception) { false }
 
     private fun openApp(ctx: Context, name: String): Boolean {
-        if (name == "settings") return start(ctx, Intent(Settings.ACTION_SETTINGS))
+        if (name.length < 3) return false
         val pm = ctx.packageManager
         val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val word = Regex("(^|\\s)" + Regex.escape(name) + "(\\s|$)")
         val hit = pm.queryIntentActivities(launcher, 0)
             .map { it.loadLabel(pm).toString() to it.activityInfo.packageName }
-            .minByOrNull { (label, _) ->
-                val l = label.lowercase()
-                when { l == name -> 0; l.startsWith(name) -> 1; l.contains(name) -> 2; else -> 9 }
-            }?.takeIf { (label, _) -> label.lowercase().contains(name) } ?: return false
+            .filter { (label, _) -> label.lowercase() == name || word.containsMatchIn(label.lowercase()) }
+            .minByOrNull { (label, _) -> if (label.lowercase() == name) 0 else label.length } ?: return false
         val i = pm.getLaunchIntentForPackage(hit.second) ?: return false
         return start(ctx, i)
     }

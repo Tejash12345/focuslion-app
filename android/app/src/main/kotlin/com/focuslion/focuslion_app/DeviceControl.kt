@@ -64,6 +64,8 @@ object DeviceControl {
                 "screen_time" -> screenTime(activity)
                 "power_menu", "lock", "screenshot", "home", "back", "recents", "notifications", "quick_settings" -> globalAction(activity, a)
                 "read_screen" -> readScreen(activity)
+                "location" -> location(activity)
+                "agenda" -> agenda(activity, int(args, "days"))
                 // act on the app underneath (Leo's window steps aside first — see LeoActivity)
                 "scroll" -> onScreen(activity, "Scrolled") { it.scroll(str(args, "dir") != "up") }
                 "tap" -> onScreen(activity, "Tapped ${str(args, "text")}") { it.tapText(str(args, "text")) }
@@ -425,8 +427,58 @@ object DeviceControl {
     /** Run an accessibility action on the app underneath, after Leo has stepped aside. */
     private fun onScreen(activity: Activity, msg: String, act: (LeoAccessibility) -> Boolean): Map<String, Any?> {
         val svc = LeoAccessibility.instance ?: return needAccessibility(activity)
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ try { act(svc) } catch (_: Exception) {} }, 650)
-        return ok(msg)
+        // from the full FocusLion app the "screen" is FocusLion itself — nothing to act on
+        if (activity !is LeoActivity) return fail("Switch to that app first, then say \"Hey Leo\" and the command")
+        // LeoActivity has already stepped aside and waited; report the REAL result
+        val done = try { act(svc) } catch (_: Exception) { false }
+        return if (done) ok(msg) else fail("I couldn't do that on this screen")
+    }
+
+    // ---------- where am I (for weather) ----------
+    private fun location(activity: Activity): Map<String, Any?> {
+        if (ContextCompat.checkSelfPermission(activity, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            androidx.core.app.ActivityCompat.requestPermissions(activity, arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION), 7401)
+            return fail("Allow location for FocusLion, then ask me again — or tell me the city")
+        }
+        val lm = activity.getSystemService(Context.LOCATION_SERVICE) as android.location.LocationManager
+        val loc = listOf(android.location.LocationManager.NETWORK_PROVIDER, android.location.LocationManager.GPS_PROVIDER,
+            android.location.LocationManager.PASSIVE_PROVIDER)
+            .mapNotNull { p -> try { @Suppress("MissingPermission") lm.getLastKnownLocation(p) } catch (_: Exception) { null } }
+            .maxByOrNull { it.time } ?: return fail("I couldn't get your location — tell me the city")
+        return ok("Location found", mapOf("lat" to loc.latitude, "lon" to loc.longitude))
+    }
+
+    // ---------- calendar: "what's on my calendar today?" ----------
+    private fun agenda(activity: Activity, daysRaw: Int): Map<String, Any?> {
+        if (ContextCompat.checkSelfPermission(activity, Manifest.permission.READ_CALENDAR) != PackageManager.PERMISSION_GRANTED) {
+            androidx.core.app.ActivityCompat.requestPermissions(activity, arrayOf(Manifest.permission.READ_CALENDAR), 7402)
+            return fail("Allow calendar access for FocusLion, then ask me again")
+        }
+        val days = daysRaw.coerceIn(1, 7)
+        val start = java.util.Calendar.getInstance().apply {
+            set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0); set(java.util.Calendar.SECOND, 0)
+        }.timeInMillis
+        val end = start + days * 86_400_000L
+        val uri = android.provider.CalendarContract.Instances.CONTENT_URI.buildUpon().also {
+            android.content.ContentUris.appendId(it, start); android.content.ContentUris.appendId(it, end)
+        }.build()
+        val cols = arrayOf(android.provider.CalendarContract.Instances.TITLE, android.provider.CalendarContract.Instances.BEGIN,
+            android.provider.CalendarContract.Instances.ALL_DAY, android.provider.CalendarContract.Instances.EVENT_LOCATION)
+        val fmt = java.text.SimpleDateFormat("EEE h:mm a", java.util.Locale.ENGLISH)
+        val out = ArrayList<String>()
+        // only calendars the user shows, and not events they declined
+        val where = android.provider.CalendarContract.Instances.VISIBLE + "=1 AND " +
+            android.provider.CalendarContract.Instances.SELF_ATTENDEE_STATUS + "!=" + android.provider.CalendarContract.Attendees.ATTENDEE_STATUS_DECLINED
+        activity.contentResolver.query(uri, cols, where, null, android.provider.CalendarContract.Instances.BEGIN + " ASC")?.use { c ->
+            while (c.moveToNext() && out.size < 15) {
+                val title = c.getString(0) ?: continue
+                val begin = c.getLong(1)
+                val allDay = c.getInt(2) == 1
+                val place = c.getString(3).orEmpty()
+                out += (if (allDay) "All day" else fmt.format(java.util.Date(begin))) + " — " + title + (if (place.isNotBlank()) " at $place" else "")
+            }
+        }
+        return ok(if (out.isEmpty()) "Nothing on your calendar ${if (days == 1) "today" else "in the next $days days"}" else "Calendar: " + out.joinToString(" | "))
     }
 
     // ---------- alarms off ----------
