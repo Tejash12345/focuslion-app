@@ -64,6 +64,9 @@ object DeviceControl {
                 "screen_time" -> screenTime(activity)
                 "power_menu", "lock", "screenshot", "home", "back", "recents", "notifications", "quick_settings" -> globalAction(activity, a)
                 "read_screen" -> readScreen(activity)
+                "alarm_off" -> alarmOff(activity, str(args, "label"))
+                "timer_off" -> start(activity, Intent(AlarmClock.ACTION_DISMISS_TIMER), "Timer stopped")
+                "read_messages" -> readMessages(activity, int(args, "minutes"))
                 "bubble_start" -> bubbleStart(activity, args["wake"] == true)
                 "bubble_stop" -> { LeoBubbleService.stop(activity); ok("Leo bubble off") }
                 "take_route" -> { val r = LeoBubbleService.takeRoute(); if (r == null) fail("none") else ok(r) }
@@ -406,6 +409,36 @@ object DeviceControl {
             "Battery $level%" + (if (bm.isCharging) " (charging)" else "") + " · %.1f of %.0f GB free · %s".format(freeGb, totalGb, net),
             mapOf("level" to level, "charging" to bm.isCharging, "freeGb" to freeGb, "network" to net, "model" to "${Build.MANUFACTURER} ${Build.MODEL}"),
         )
+    }
+
+    // ---------- alarms off ----------
+    /** Turn off the ringing/next alarm, or one by label ("gym"), via the Clock app. */
+    private fun alarmOff(activity: Activity, label: String): Map<String, Any?> {
+        val i = Intent(AlarmClock.ACTION_DISMISS_ALARM)
+        if (label.isNotBlank() && label.lowercase() !in setOf("all", "every", "alarm", "the alarm")) {
+            i.putExtra(AlarmClock.EXTRA_ALARM_SEARCH_MODE, AlarmClock.ALARM_SEARCH_MODE_LABEL)
+            i.putExtra(AlarmClock.EXTRA_MESSAGE, label)
+        } else if (label.lowercase() in setOf("all", "every")) {
+            i.putExtra(AlarmClock.EXTRA_ALARM_SEARCH_MODE, AlarmClock.ALARM_SEARCH_MODE_ALL)
+        } else {
+            i.putExtra(AlarmClock.EXTRA_ALARM_SEARCH_MODE, AlarmClock.ALARM_SEARCH_MODE_NEXT)
+        }
+        return start(activity, i, if (label.isBlank()) "Alarm turned off" else "Turned off \"$label\" alarm")
+    }
+
+    // ---------- messages: "any new messages? who sent what?" ----------
+    private fun readMessages(activity: Activity, minutes: Int): Map<String, Any?> {
+        if (!LeoNotifications.hasAccess(activity)) {
+            activity.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+            return fail("Turn on Notification access for FocusLion, then ask me again")
+        }
+        val since = System.currentTimeMillis() - (if (minutes > 0) minutes else 24 * 60) * 60_000L
+        val list = LeoNotifications.recent(since)
+        if (list.isEmpty()) return ok("No new messages since I started watching")
+        val fmt = java.text.SimpleDateFormat("h:mm a", java.util.Locale.ENGLISH)
+        return ok("Recent messages (newest first): " + list.take(20).joinToString(" | ") {
+            "${fmt.format(java.util.Date(it.at))} ${it.app} — ${it.from}: ${it.text.take(160)}"
+        })
     }
 
     // ---------- Leo everywhere: floating bubble + offline "Hey Leo" ----------

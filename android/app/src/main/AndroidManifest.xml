@@ -104,6 +104,18 @@
                 android:resource="@xml/leo_accessibility" />
         </service>
 
+        <!-- "Leo, any new messages?" — reads message notifications into memory
+             only (user grants Notification access; OTPs are masked) -->
+        <service
+            android:name=".LeoNotifications"
+            android:label="FocusLion Leo"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
         <!-- Leo-only pop-up window (bubble / "Hey Leo"): its own small task, so
              closing Leo returns to the app you were in, not to FocusLion -->
         <activity

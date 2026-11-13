@@ -256,7 +256,10 @@ class LeoBubbleService : Service() {
         main.post {
             val outside = !appVisible && screenOn
             bubble?.visibility = if (outside && !hiddenByUser) View.VISIBLE else View.GONE
-            speech?.setPause(!(outside && wakeWanted))
+            // fully RELEASE the microphone while Leo / FocusLion is on screen —
+            // a merely paused recorder still holds it and Leo would hear silence
+            if (outside && wakeWanted && !capturing) { if (speech == null) startWake() }
+            else if (!capturing) stopWake()
         }
     }
 
@@ -274,7 +277,7 @@ class LeoBubbleService : Service() {
 
     // ---------- offline "Hey Leo" (Vosk) ----------
     private fun prepareModel() {
-        if (model != null) { startWake(); return }
+        if (model != null) { refresh(); return }
         Thread {
             try {
                 val dir = File(filesDir, MODEL_DIR)
@@ -289,7 +292,7 @@ class LeoBubbleService : Service() {
                 main.post {
                     model = m
                     updateNotif(readyText())
-                    startWake()
+                    refresh() // starts listening only if FocusLion isn't on screen
                 }
             } catch (e: Exception) {
                 main.post { updateNotif("“Hey Leo” needs internet once to download — tap the lion meanwhile") }
@@ -316,7 +319,7 @@ class LeoBubbleService : Service() {
 
     private fun startWake() {
         val m = model ?: return
-        if (speech != null) { refresh(); return }
+        if (speech != null || capturing) return
         try {
             // grammar = only the wake phrases: tiny, accurate, low battery
             val rec = Recognizer(m, 16000f, "[\"hey leo\", \"hi leo\", \"okay leo\", \"hello leo\", \"ok leo\", \"[unk]\"]")
@@ -329,7 +332,6 @@ class LeoBubbleService : Service() {
                 override fun onTimeout() {}
             })
             speech = s
-            refresh()
         } catch (_: Exception) {
             updateNotif("Couldn't start “Hey Leo” — tap the lion instead")
         }
@@ -337,10 +339,70 @@ class LeoBubbleService : Service() {
 
     private fun check(json: String?, key: String) {
         val t = try { JSONObject(json ?: "{}").optString(key) } catch (_: Exception) { "" }
-        if (Regex("\\b(hey|hi|okay|ok|hello) leo\\b").containsMatchIn(t)) {
-            speech?.reset()
-            if (!appVisible && screenOn) main.post { openLeo("") }
+        if (!capturing && Regex("\\b(hey|hi|okay|ok|hello) leo\\b").containsMatchIn(t)) {
+            if (appVisible || !screenOn) return
+            main.post { captureCommand() }
         }
+    }
+
+    // ---------- after "Hey Leo": catch the command in the same breath ----------
+    @Volatile private var capturing = false
+    private var cmdSpeech: SpeechService? = null
+
+    /**
+     * "Hey Leo, open WhatsApp": the wake recognizer only knows the wake words,
+     * so we switch to a free-form offline recognizer for a few seconds, then
+     * open Leo with whatever was said ("" = Leo starts listening himself).
+     */
+    private fun captureCommand() {
+        if (capturing) return
+        val m = model ?: run { openLeo(""); return }
+        capturing = true
+        stopWake()
+        buzz()
+        var done = false
+        fun finish(text: String) {
+            if (done) return
+            done = true
+            main.post {
+                cmdSpeech?.let { try { it.stop(); it.shutdown() } catch (_: Exception) {} }
+                cmdSpeech = null
+                capturing = false
+                openLeo(text.replace(Regex("^(hey|hi|okay|ok|hello)?\\s*leo\\b[ ,]*"), "").trim())
+            }
+        }
+        try {
+            val rec = Recognizer(m, 16000f)
+            val s = SpeechService(rec, 16000f)
+            val l = object : RecognitionListener {
+                override fun onPartialResult(h: String?) {}
+                override fun onResult(h: String?) {
+                    val t = try { JSONObject(h ?: "{}").optString("text") } catch (_: Exception) { "" }
+                    if (t.isNotBlank() && t.trim() !in setOf("leo", "hey leo", "the", "a", "huh")) finish(t)
+                }
+                override fun onFinalResult(h: String?) {
+                    finish(try { JSONObject(h ?: "{}").optString("text") } catch (_: Exception) { "" })
+                }
+                override fun onError(e: Exception?) { finish("") }
+                override fun onTimeout() { finish("") }
+            }
+            s.startListening(l, 5000) // up to 5 s for the command
+            cmdSpeech = s
+            // nobody spoke after "Hey Leo" -> just open Leo listening
+            main.postDelayed({ if (!done) finish("") }, 5500)
+        } catch (_: Exception) {
+            capturing = false
+            openLeo("")
+        }
+    }
+
+    private fun buzz() {
+        try {
+            val v = if (Build.VERSION.SDK_INT >= 31) (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager).defaultVibrator
+            else @Suppress("DEPRECATION") (getSystemService(Context.VIBRATOR_SERVICE) as android.os.Vibrator)
+            if (Build.VERSION.SDK_INT >= 26) v.vibrate(android.os.VibrationEffect.createOneShot(60, 180))
+            else @Suppress("DEPRECATION") v.vibrate(60)
+        } catch (_: Exception) {}
     }
 
     private fun stopWake() {
