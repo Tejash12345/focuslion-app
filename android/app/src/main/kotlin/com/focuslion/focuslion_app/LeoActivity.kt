@@ -37,6 +37,9 @@ class LeoActivity : Activity() {
         private const val HOST = "new-app-ruddy-nine.vercel.app"
         private const val REQ_PERMS = 5101
         private const val REQ_FILE = 5102
+        private val ON_SCREEN = setOf("scroll", "tap", "type", "home", "back", "recents", "notifications", "quick_settings", "screenshot", "lock", "power_menu")
+        private val LEAVES = setOf("open_app", "settings", "youtube", "music", "maps", "web", "url", "camera", "video", "call", "sms",
+            "whatsapp", "email", "calendar", "share", "send_whatsapp", "send_bulk", "close_app")
     }
 
     private lateinit var web: WebView
@@ -178,7 +181,17 @@ class LeoActivity : Activity() {
                 reply(id, mapOf("ok" to true, "msg" to "Opening FocusLion"))
                 finish()
             }
-            else -> reply(id, DeviceControl.handle(this, toMap(cmd)))
+            in ON_SCREEN -> {
+                // scroll / tap / type act on the app underneath: step aside first
+                moveTaskToBack(true)
+                reply(id, DeviceControl.handle(this, toMap(cmd)))
+            }
+            else -> {
+                val res = DeviceControl.handle(this, toMap(cmd))
+                reply(id, res)
+                // it opened another app/screen: get out of the way (don't come back on Back)
+                if (res["ok"] == true && a in LEAVES) moveTaskToBack(true)
+            }
         }
     }
 

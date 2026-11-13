@@ -64,6 +64,10 @@ object DeviceControl {
                 "screen_time" -> screenTime(activity)
                 "power_menu", "lock", "screenshot", "home", "back", "recents", "notifications", "quick_settings" -> globalAction(activity, a)
                 "read_screen" -> readScreen(activity)
+                // act on the app underneath (Leo's window steps aside first — see LeoActivity)
+                "scroll" -> onScreen(activity, "Scrolled") { it.scroll(str(args, "dir") != "up") }
+                "tap" -> onScreen(activity, "Tapped ${str(args, "text")}") { it.tapText(str(args, "text")) }
+                "type" -> onScreen(activity, "Typed it") { it.typeText(str(args, "text")) }
                 "alarm_off" -> alarmOff(activity, str(args, "label"))
                 "timer_off" -> start(activity, Intent(AlarmClock.ACTION_DISMISS_TIMER), "Timer stopped")
                 "read_messages" -> readMessages(activity, int(args, "minutes"))
@@ -96,7 +100,8 @@ object DeviceControl {
     private fun fail(msg: String) = mapOf("ok" to false, "msg" to msg)
 
     private fun start(activity: Activity, intent: Intent, msg: String): Map<String, Any?> = try {
-        activity.startActivity(intent)
+        // own task: Back from that app never lands inside Leo's window
+        activity.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         ok(msg)
     } catch (e: ActivityNotFoundException) {
         fail("No app on this phone can do that")
@@ -266,6 +271,7 @@ object DeviceControl {
     }
 
     private fun settings(activity: Activity, panel: String): Map<String, Any?> {
+        QuickCommands.settingsIntent(panel)?.let { return start(activity, it, "Opened ${panel.ifEmpty { "settings" }} settings") }
         val p = panel.lowercase()
         val action = when {
             p.contains("wifi") || p.contains("wi-fi") ->
@@ -414,6 +420,13 @@ object DeviceControl {
             "Battery $level%" + (if (bm.isCharging) " (charging)" else "") + " · %.1f of %.0f GB free · %s".format(freeGb, totalGb, net),
             mapOf("level" to level, "charging" to bm.isCharging, "freeGb" to freeGb, "network" to net, "model" to "${Build.MANUFACTURER} ${Build.MODEL}"),
         )
+    }
+
+    /** Run an accessibility action on the app underneath, after Leo has stepped aside. */
+    private fun onScreen(activity: Activity, msg: String, act: (LeoAccessibility) -> Boolean): Map<String, Any?> {
+        val svc = LeoAccessibility.instance ?: return needAccessibility(activity)
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ try { act(svc) } catch (_: Exception) {} }, 650)
+        return ok(msg)
     }
 
     // ---------- alarms off ----------

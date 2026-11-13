@@ -109,6 +109,83 @@ class LeoAccessibility : AccessibilityService() {
 
     override fun onInterrupt() {}
 
+    // ---------- hands on the current screen (the app the user is looking at) ----------
+
+    /** Scroll the main list/page of the current app. */
+    fun scroll(forward: Boolean): Boolean {
+        val root = rootInActiveWindow ?: return false
+        if (root.packageName?.toString() == packageName) return false // never scroll Leo himself
+        val target = biggestScrollable(root)
+        if (target != null && target.performAction(
+                if (forward) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)) return true
+        return swipe(forward) // apps without accessible scroll views
+    }
+
+    private fun biggestScrollable(n: AccessibilityNodeInfo?, depth: Int = 0): AccessibilityNodeInfo? {
+        if (n == null || depth > 40) return null
+        var best: AccessibilityNodeInfo? = if (n.isScrollable && n.isVisibleToUser) n else null
+        var bestArea = best?.let { area(it) } ?: 0
+        for (i in 0 until n.childCount) {
+            val c = biggestScrollable(n.getChild(i), depth + 1) ?: continue
+            val a = area(c)
+            if (a > bestArea) { best = c; bestArea = a }
+        }
+        return best
+    }
+
+    private fun area(n: AccessibilityNodeInfo): Int {
+        val r = android.graphics.Rect(); n.getBoundsInScreen(r); return r.width() * r.height()
+    }
+
+    /** A finger swipe up/down the middle of the screen. */
+    private fun swipe(forward: Boolean): Boolean {
+        val dm = resources.displayMetrics
+        val x = dm.widthPixels / 2f
+        val (y1, y2) = if (forward) dm.heightPixels * 0.72f to dm.heightPixels * 0.28f else dm.heightPixels * 0.28f to dm.heightPixels * 0.72f
+        val path = android.graphics.Path().apply { moveTo(x, y1); lineTo(x, y2) }
+        val g = android.accessibilityservice.GestureDescription.Builder()
+            .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0, 280))
+            .build()
+        return dispatchGesture(g, null, null)
+    }
+
+    /** Tap the visible button/item whose text (or label) matches — "tap Storage". */
+    fun tapText(label: String): Boolean {
+        val root = rootInActiveWindow ?: return false
+        if (root.packageName?.toString() == packageName) return false
+        val q = label.trim().lowercase()
+        if (q.isEmpty()) return false
+        val hits = root.findAccessibilityNodeInfosByText(label.trim()).filter { it.isVisibleToUser }
+        // prefer an exact match, then the shortest label that contains it
+        val node = hits.minByOrNull {
+            val t = (it.text ?: it.contentDescription)?.toString()?.trim()?.lowercase().orEmpty()
+            if (t == q) 0 else if (t.startsWith(q)) 1 + t.length else 1000 + t.length
+        } ?: return false
+        var c: AccessibilityNodeInfo? = node
+        while (c != null && !c.isClickable) c = c.parent
+        return (c ?: node).performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    }
+
+    /** Type into the focused text box of the current app — "type hello". */
+    fun typeText(text: String): Boolean {
+        val root = rootInActiveWindow ?: return false
+        if (root.packageName?.toString() == packageName) return false
+        val field = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: firstEditable(root) ?: return false
+        val hint = Build.VERSION.SDK_INT >= 26 && field.isShowingHintText
+        val existing = field.text?.toString().orEmpty().takeIf { field.isEditable && !hint } ?: ""
+        val args = android.os.Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, (existing + (if (existing.isEmpty()) "" else " ") + text).trim())
+        }
+        return field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    }
+
+    private fun firstEditable(n: AccessibilityNodeInfo?, depth: Int = 0): AccessibilityNodeInfo? {
+        if (n == null || depth > 40) return null
+        if (n.isEditable && n.isVisibleToUser) return n
+        for (i in 0 until n.childCount) firstEditable(n.getChild(i), depth + 1)?.let { return it }
+        return null
+    }
+
     fun global(action: String): Boolean {
         val a = when (action) {
             "power_menu" -> GLOBAL_ACTION_POWER_DIALOG

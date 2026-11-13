@@ -369,7 +369,7 @@ class LeoBubbleService : Service() {
         pendingWake = null
         stopWake()
         buzz()
-        launchLeo()
+        listeningUi(true) // the bubble glows while Leo listens for the command
         var done = false
         var spoke = false
         fun finish(text: String) {
@@ -378,8 +378,18 @@ class LeoBubbleService : Service() {
             main.post {
                 cmdSpeech?.let { try { it.stop(); it.shutdown() } catch (_: Exception) {} }
                 cmdSpeech = null
-                pendingWake = text.replace(Regex("^(hey|hi|okay|ok|hello)?\\s*leo\\b[ ,]*"), "").trim()
+                listeningUi(false)
+                val cmd = text.replace(Regex("^(hey|hi|okay|ok|hello)?\\s*leo\\b[ ,]*"), "").trim()
                 capturing = false
+                // screen commands ("scroll down", "tap storage", "go back"…) run right
+                // here on the app you're using — no Leo window popping up over it
+                if (cmd.isNotEmpty() && QuickCommands.tryRun(this, cmd)) {
+                    buzz()
+                    refresh()
+                    return@post
+                }
+                pendingWake = cmd
+                launchLeo()
                 refresh()
             }
         }
@@ -409,6 +419,32 @@ class LeoBubbleService : Service() {
         } catch (_: Exception) {
             capturing = false
             pendingWake = ""
+        }
+    }
+
+    /** Bubble feedback while listening after "Hey Leo": glowing ring + gentle pulse. */
+    private var pulse: android.animation.ObjectAnimator? = null
+    private fun listeningUi(on: Boolean) {
+        val b = bubble ?: return
+        val bg = b.background as? GradientDrawable
+        val d = resources.displayMetrics.density
+        if (on) {
+            b.visibility = View.VISIBLE // show even inside other apps while we listen
+            bg?.setStroke((4 * d).toInt(), 0xFFF43F5E.toInt())
+            pulse = android.animation.ObjectAnimator.ofPropertyValuesHolder(
+                b,
+                android.animation.PropertyValuesHolder.ofFloat(View.SCALE_X, 1f, 1.18f),
+                android.animation.PropertyValuesHolder.ofFloat(View.SCALE_Y, 1f, 1.18f),
+            ).apply {
+                duration = 420
+                repeatCount = android.animation.ValueAnimator.INFINITE
+                repeatMode = android.animation.ValueAnimator.REVERSE
+                start()
+            }
+        } else {
+            pulse?.cancel(); pulse = null
+            b.scaleX = 1f; b.scaleY = 1f
+            bg?.setStroke((2 * d).toInt(), 0xCCBAE6FD.toInt())
         }
     }
 
