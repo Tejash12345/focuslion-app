@@ -30,9 +30,6 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import org.json.JSONObject
 import org.vosk.Model
-import org.vosk.Recognizer
-import org.vosk.android.RecognitionListener
-import org.vosk.android.SpeechService
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -64,6 +61,9 @@ class LeoBubbleService : Service() {
         @Volatile var appVisible = false
         /** What was said after "Hey Leo" (or "" for a bubble tap) — the web app takes it. */
         @Volatile var pendingWake: String? = null
+        /** What Leo last heard after "Hey Leo" and what he did — shown in settings. */
+        @Volatile var lastHeard: String = ""
+        @Volatile var lastResult: String = ""
 
         const val EXTRA_BUBBLE = "bubble"
 
@@ -87,7 +87,8 @@ class LeoBubbleService : Service() {
             val s = instance
             return mapOf(
                 "running" to (s != null),
-                "listening" to (s?.speech != null),
+                "listening" to (s?.voice != null),
+                "lastHeard" to lastHeard, "lastResult" to lastResult,
                 "model" to (s?.model != null),
                 "wake" to (s?.wakeWanted == true),
             )
@@ -105,7 +106,7 @@ class LeoBubbleService : Service() {
     private var wakeWanted = false
     private var bubbleWanted = true
     private var model: Model? = null
-    private var speech: SpeechService? = null
+    private var voice: VoiceLoop? = null
     private var screenOn = true
     private var lastFire = 0L
 
@@ -157,10 +158,12 @@ class LeoBubbleService : Service() {
     override fun onDestroy() {
         instance = null
         main.removeCallbacksAndMessages(null)
+        stopWake()
         AudioDuck.release(this) // never leave the user's music paused
         try { unregisterReceiver(screenRx) } catch (_: Exception) {}
-        stopWake()
-        model?.close(); model = null
+        // free the model only after the mic loop has really finished with it
+        model?.let { m -> Thread { synchronized(VoiceLoop.mic) { try { m.close() } catch (_: Exception) {} } }.start() }
+        model = null
         removeBubble()
         super.onDestroy()
     }
@@ -290,7 +293,7 @@ class LeoBubbleService : Service() {
             bubble?.visibility = if (outside && !hiddenByUser) View.VISIBLE else View.GONE
             // fully RELEASE the microphone while Leo / FocusLion is on screen —
             // a merely paused recorder still holds it and Leo would hear silence
-            if (outside && wakeWanted && !capturing) { if (speech == null) startWake() }
+            if (outside && wakeWanted && !capturing) { if (voice == null) startWake() }
             else if (!capturing) stopWake()
         }
     }
@@ -355,112 +358,83 @@ class LeoBubbleService : Service() {
 
     private fun startWake() {
         val m = model ?: return
-        if (speech != null || capturing) return
-        try {
-            // grammar = only the wake phrases: tiny, accurate, low battery
-            val rec = Recognizer(m, 16000f, "[\"hey leo\", \"hi leo\", \"okay leo\", \"hello leo\", \"ok leo\", \"[unk]\"]")
-            val s = SpeechService(rec, 16000f)
-            s.startListening(object : RecognitionListener {
-                override fun onPartialResult(h: String?) { check(h, "partial") }
-                override fun onResult(h: String?) { check(h, "text") }
-                override fun onFinalResult(h: String?) {}
-                override fun onError(e: Exception?) { main.postDelayed({ stopWake(); startWake() }, 3000) }
-                override fun onTimeout() {}
+        if (voice != null || capturing) return
+        lateinit var loop: VoiceLoop
+        // callbacks from an old (stopped) loop are ignored: only the current one counts
+        loop = VoiceLoop(m,
+            onWake = { if (voice === loop) onWakeHeard() },
+            onCommand = { cmd -> if (voice === loop) onCommandHeard(cmd) },
+            onEnd = {
+                if (voice === loop) {
+                    // the loop ended by itself (mic taken by a call, error): clean up, retry soon
+                    voice = null
+                    if (capturing) { capturing = false; listeningUi(false); AudioDuck.release(this) }
+                    main.postDelayed({ refresh() }, 2000)
+                }
             })
-            speech = s
-        } catch (_: Exception) {
-            updateNotif("Couldn't start “Hey Leo” — tap the lion instead")
-        }
+        voice = loop
+        loop.start()
     }
 
-    private fun check(json: String?, key: String) {
-        val t = try { JSONObject(json ?: "{}").optString(key) } catch (_: Exception) { "" }
-        if (!capturing && Regex("\\b(hey|hi|okay|ok|hello) leo\\b").containsMatchIn(t)) {
-            if (appVisible || !screenOn) return
-            main.post { captureCommand() }
-        }
-    }
-
-    // ---------- after "Hey Leo": catch the command in the same breath ----------
+    // ---------- after "Hey Leo" ----------
     @Volatile private var capturing = false
-    private var cmdSpeech: SpeechService? = null
 
     /** True while the command after "Hey Leo" is still being heard. */
     fun isCapturing() = capturing
 
-    /**
-     * "Hey Leo, open WhatsApp": Leo's window opens INSTANTLY (feedback), while
-     * a free-form offline recognizer keeps listening for the command. When it
-     * is done we hand the text over ("" = no command, Leo listens himself).
-     * If nothing is said within ~1.6 s we hand over at once — no waiting.
-     */
-    private fun captureCommand() {
-        if (capturing) return
-        val m = model ?: run { openLeo(""); return }
+    /** "Hey Leo" spotted: feedback now; the same mic loop keeps hearing the command. */
+    private fun onWakeHeard() {
+        if (appVisible || !screenOn) return
         capturing = true
         pendingWake = null
-        stopWake()
         buzz()
         listeningUi(true) // the bubble glows while Leo listens for the command
-        AudioDuck.hold(this) // pause YouTube/music so the song isn't heard as the command
-        var done = false
-        var spoke = false
-        fun finish(text: String) {
-            if (done) return
-            done = true
-            main.post {
-                cmdSpeech?.let { try { it.stop(); it.shutdown() } catch (_: Exception) {} }
-                cmdSpeech = null
-                listeningUi(false)
-                AudioDuck.release(this) // music resumes (Leo's window takes focus again if it opens)
-                val cmd = text.replace(Regex("^(hey|hi|okay|ok|hello)?\\s*leo\\b[ ,]*"), "").trim()
-                capturing = false
-                // screen commands ("scroll down", "tap storage", "go back"…) run right
-                // here on the app you're using — no Leo window popping up over it
-                val handled = cmd.isNotEmpty() && try { QuickCommands.tryRun(this, cmd) } catch (_: Exception) { false }
-                if (handled) {
-                    buzz()
-                    refresh()
-                    return@post
-                }
-                pendingWake = cmd
-                launchLeo()
-                refresh()
-            }
-        }
-        try {
-            val rec = Recognizer(m, 16000f)
-            val s = SpeechService(rec, 16000f)
-            val l = object : RecognitionListener {
-                override fun onPartialResult(h: String?) {
-                    val p = try { JSONObject(h ?: "{}").optString("partial") } catch (_: Exception) { "" }
-                    if (p.isNotBlank() && p.trim() !in setOf("leo", "hey leo", "the", "a", "huh")) spoke = true
-                }
-                override fun onResult(h: String?) {
-                    val t = try { JSONObject(h ?: "{}").optString("text") } catch (_: Exception) { "" }
-                    if (t.isNotBlank() && t.trim() !in setOf("leo", "hey leo", "the", "a", "huh")) finish(t)
-                }
-                override fun onFinalResult(h: String?) {
-                    finish(try { JSONObject(h ?: "{}").optString("text") } catch (_: Exception) { "" })
-                }
-                override fun onError(e: Exception?) { finish("") }
-                override fun onTimeout() { finish("") }
-            }
-            s.startListening(l, 6000)
-            cmdSpeech = s
-            // silence right after "Hey Leo" -> hand over immediately (Leo listens himself)
-            main.postDelayed({ if (!done && !spoke) finish("") }, 3000)
-            main.postDelayed({ if (!done) finish("") }, 6500)
-        } catch (_: Exception) {
-            // couldn't start the command recognizer: just open Leo listening
-            capturing = false
-            listeningUi(false)
-            AudioDuck.release(this)
-            pendingWake = ""
-            launchLeo()
-            refresh()
-        }
+        AudioDuck.hold(this) // pause YouTube/music so it isn't heard as the command
     }
+
+    /** The command after "Hey Leo" ("" = nothing said: Leo's window listens himself). */
+    private fun onCommandHeard(cmd: String) {
+        if (!capturing) return
+        capturing = false
+        listeningUi(false)
+        AudioDuck.release(this)
+        lastHeard = cmd
+        // screen commands ("scroll down", "tap storage", "go back"…) run right
+        // here on the app you're using — no Leo window popping up over it
+        if (cmd.isNotEmpty() && LeoAccessibility.instance == null && QuickCommands.isScreenCommand(cmd)) {
+            lastResult = "needs Accessibility"
+            askForAccessibility()
+            refresh()
+            return
+        }
+        val handled = cmd.isNotEmpty() && try { QuickCommands.tryRun(this, cmd) } catch (_: Exception) { false }
+        if (handled) {
+            lastResult = "done on screen"
+            buzz()
+            refresh()
+            return
+        }
+        lastResult = if (cmd.isEmpty()) "opened Leo (no command heard)" else "sent to Leo"
+        pendingWake = cmd
+        launchLeo()
+        refresh()
+    }
+
+    /** Screen control needs the "FocusLion Leo" Accessibility switch — tell the user how. */
+    private fun askForAccessibility() {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val tap = PendingIntent.getActivity(this, 3, Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val n = NotificationCompat.Builder(this, CHANNEL)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle("Turn on “FocusLion Leo” in Accessibility")
+            .setContentText("Leo needs it to scroll, tap and type in other apps. Tap to open settings.")
+            .setAutoCancel(true)
+            .setContentIntent(tap)
+            .build()
+        try { nm.notify(NOTIF_ID + 1, n) } catch (_: SecurityException) { }
+    }
+
 
     /** Bubble feedback while listening after "Hey Leo": glowing ring + gentle pulse. */
     private var pulse: android.animation.ObjectAnimator? = null
@@ -498,7 +472,7 @@ class LeoBubbleService : Service() {
     }
 
     private fun stopWake() {
-        speech?.let { try { it.stop(); it.shutdown() } catch (_: Exception) {} }
-        speech = null
+        voice?.stop()
+        voice = null
     }
 }

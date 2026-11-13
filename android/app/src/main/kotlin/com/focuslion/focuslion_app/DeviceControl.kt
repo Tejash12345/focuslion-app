@@ -565,10 +565,15 @@ object DeviceControl {
             st["running"] != true -> "Not running — open FocusLion once"
             st["wake"] != true -> "Off"
             st["model"] != true -> "Downloading the voice model (needs internet once)…"
+            st["listening"] != true -> "Not listening right now (mic busy or screen off) — retrying…"
             !battery -> "Listening — but battery saver may stop it (set FocusLion to Unrestricted)"
             else -> "Listening for “Hey Leo” ✓"
         }
-        return ok(msg, st + mapOf("mic" to mic, "battery" to battery, "overlay" to overlay))
+        val a11y = LeoAccessibility.instance != null
+        val heard = (st["lastHeard"] as? String).orEmpty()
+        val full = msg + (if (!a11y) " · Turn on Accessibility → FocusLion Leo for scroll/tap" else "") +
+            (if (heard.isNotEmpty()) " · Last heard: “$heard” → ${st["lastResult"]}" else "")
+        return ok(full, st + mapOf("mic" to mic, "battery" to battery, "overlay" to overlay, "accessibility" to a11y))
     }
 
     /** "close Messages" — go home and stop that app's background process. */

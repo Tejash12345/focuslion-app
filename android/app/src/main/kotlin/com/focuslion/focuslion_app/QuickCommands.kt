@@ -15,6 +15,15 @@ import android.provider.Settings
  */
 object QuickCommands {
 
+    /** Would this command act on the screen (needs the Accessibility switch)? */
+    fun isScreenCommand(raw: String): Boolean {
+        val w = normalize(raw).split(" ")
+        if (parseScroll(w) != null) return true
+        val first = w.firstOrNull() ?: return false
+        return first in setOf("tap", "click", "press", "type", "next", "previous", "swipe", "like", "subscribe", "share",
+            "comment", "comments", "skip", "back", "home", "search") || w == listOf("go", "back")
+    }
+
     fun tryRun(ctx: Context, raw: String): Boolean {
         val t = normalize(raw)
         if (t.isEmpty()) return false
