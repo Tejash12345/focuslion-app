@@ -28,6 +28,30 @@ object QuickCommands {
             val up = t.contains("up") || t.contains("back")
             return a?.scroll(!up) ?: false
         }
+        // ---- reels / shorts / videos: next & previous ----
+        when (t) {
+            "next", "next video", "next reel", "next short", "next one" -> return a?.scroll(true) ?: false
+            // during an ad, "skip" means the Skip button; otherwise next video
+            "skip" -> return a?.tapText("skip ad") == true || a?.tapText("skip") == true || a?.scroll(true) == true
+            "previous", "previous video", "previous reel", "go previous", "last one" -> return a?.scroll(false) ?: false
+            "swipe left", "next story", "next photo", "next tab" -> return a?.swipeSideways(true) ?: false
+            "swipe right", "previous story", "previous photo", "previous tab" -> return a?.swipeSideways(false) ?: false
+        }
+        // ---- media in any app ----
+        when (t) {
+            "pause", "pause video", "pause the video", "pause music", "stop music" -> return mediaKey(ctx, android.view.KeyEvent.KEYCODE_MEDIA_PAUSE)
+            "play", "resume", "play video", "resume video", "play music" -> return mediaKey(ctx, android.view.KeyEvent.KEYCODE_MEDIA_PLAY)
+            "skip ad", "skip the ad", "skip ads" -> return a?.tapText("skip ad") == true || a?.tapText("skip") == true
+            "like", "like this", "like video", "like this video", "like it" -> return a?.tapText("like") ?: false
+            "subscribe" -> return a?.tapText("subscribe") ?: false
+            "share", "share this" -> return a?.tapText("share") ?: false
+            "comment", "comments", "open comments" -> return a?.tapText("comment") == true || a?.tapText("comments") == true
+        }
+        // ---- search inside the app you're using ----
+        Regex("^search( for)? (.+)$").find(t)?.let { m ->
+            val svc = a ?: return false
+            return svc.searchFor(m.groupValues[2]) { } // false -> Leo's window handles it
+        }
         // ---- system navigation ----
         when {
             Regex("^(go )?back$").matches(t) -> return a?.global("back") ?: false
@@ -78,6 +102,18 @@ object QuickCommands {
         if (thing in setOf("storage", "battery", "display", "sound", "wifi", "wi fi", "bluetooth", "location", "apps",
                 "notifications", "accessibility", "developer options", "about phone", "airplane mode", "hotspot", "vpn", "nfc"))
             settingsIntent(thing) else null
+
+    /** play / pause whatever app is playing (YouTube, Spotify, …). */
+    private fun mediaKey(ctx: Context, code: Int): Boolean = try {
+        val am = ctx.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+        // Leo just gave audio focus back and the player is resuming: send the key a
+        // moment later so "pause" isn't undone by that resume
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            am.dispatchMediaKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, code))
+            am.dispatchMediaKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, code))
+        }, 400)
+        true
+    } catch (_: Exception) { false }
 
     private fun start(ctx: Context, i: Intent): Boolean = try {
         ctx.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); true

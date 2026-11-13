@@ -70,6 +70,8 @@ object DeviceControl {
                 "scroll" -> onScreen(activity, "Scrolled") { it.scroll(str(args, "dir") != "up") }
                 "tap" -> onScreen(activity, "Tapped ${str(args, "text")}") { it.tapText(str(args, "text")) }
                 "type" -> onScreen(activity, "Typed it") { it.typeText(str(args, "text")) }
+                "swipe" -> onScreen(activity, "Swiped") { it.swipeSideways(str(args, "dir") != "right") }
+                "search_app" -> onScreen(activity, "Searching for ${str(args, "query")}") { it.searchFor(str(args, "query")) { } }
                 "alarm_off" -> alarmOff(activity, str(args, "label"))
                 "timer_off" -> start(activity, Intent(AlarmClock.ACTION_DISMISS_TIMER), "Timer stopped")
                 "read_messages" -> readMessages(activity, int(args, "minutes"))

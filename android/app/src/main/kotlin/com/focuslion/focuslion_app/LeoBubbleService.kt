@@ -130,6 +130,8 @@ class LeoBubbleService : Service() {
 
     override fun onDestroy() {
         instance = null
+        main.removeCallbacksAndMessages(null)
+        AudioDuck.release(this) // never leave the user's music paused
         try { unregisterReceiver(screenRx) } catch (_: Exception) {}
         stopWake()
         model?.close(); model = null
@@ -370,6 +372,7 @@ class LeoBubbleService : Service() {
         stopWake()
         buzz()
         listeningUi(true) // the bubble glows while Leo listens for the command
+        AudioDuck.hold(this) // pause YouTube/music so the song isn't heard as the command
         var done = false
         var spoke = false
         fun finish(text: String) {
@@ -379,6 +382,7 @@ class LeoBubbleService : Service() {
                 cmdSpeech?.let { try { it.stop(); it.shutdown() } catch (_: Exception) {} }
                 cmdSpeech = null
                 listeningUi(false)
+                AudioDuck.release(this) // music resumes (Leo's window takes focus again if it opens)
                 val cmd = text.replace(Regex("^(hey|hi|okay|ok|hello)?\\s*leo\\b[ ,]*"), "").trim()
                 capturing = false
                 // screen commands ("scroll down", "tap storage", "go back"…) run right
@@ -421,6 +425,7 @@ class LeoBubbleService : Service() {
             // couldn't start the command recognizer: just open Leo listening
             capturing = false
             listeningUi(false)
+            AudioDuck.release(this)
             pendingWake = ""
             launchLeo()
             refresh()

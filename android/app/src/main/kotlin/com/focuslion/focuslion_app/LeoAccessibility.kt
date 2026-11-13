@@ -155,8 +155,57 @@ class LeoAccessibility : AccessibilityService() {
         return dispatchGesture(g, null, null)
     }
 
+    /** Swipe left/right (stories, tabs, photo galleries). */
+    fun swipeSideways(toLeft: Boolean): Boolean {
+        val dm = resources.displayMetrics
+        val y = dm.heightPixels * 0.5f
+        val (x1, x2) = if (toLeft) dm.widthPixels * 0.82f to dm.widthPixels * 0.18f else dm.widthPixels * 0.18f to dm.widthPixels * 0.82f
+        val path = android.graphics.Path().apply { moveTo(x1, y); lineTo(x2, y) }
+        val g = android.accessibilityservice.GestureDescription.Builder()
+            .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0, 240))
+            .build()
+        return dispatchGesture(g, null, null)
+    }
+
+    /** Is this text box a SEARCH box (not a chat/comment box, where Enter = Send)? */
+    private fun isSearchField(n: AccessibilityNodeInfo?): Boolean {
+        if (n == null || !n.isEditable || n.isPassword) return false
+        val id = n.viewIdResourceName?.lowercase().orEmpty()
+        val cls = n.className?.toString()?.lowercase().orEmpty()
+        val hint = if (Build.VERSION.SDK_INT >= 26) n.hintText?.toString()?.lowercase().orEmpty() else ""
+        val desc = n.contentDescription?.toString()?.lowercase().orEmpty()
+        return "search" in id || "search" in cls || "search" in hint || "search" in desc || "query" in id
+    }
+
+    /**
+     * "search for lofi music": open the app's search, type into the SEARCH box
+     * (never a chat box — Enter there would send a message), press Enter.
+     * Returns whether a search box could be opened; `after` gets the final result.
+     */
+    fun searchFor(query: String, after: (Boolean) -> Unit): Boolean {
+        val root = rootInActiveWindow ?: return false
+        if (root.packageName?.toString() == packageName) return false
+        val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        val opened = isSearchField(focused) || tapText("search") || tapText("search youtube") || tapText("search instagram")
+        if (!opened) return false
+        val h = android.os.Handler(android.os.Looper.getMainLooper())
+        h.postDelayed({
+            val box = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (!isSearchField(box) || !typeText(query, replace = true)) { after(false); return@postDelayed }
+            h.postDelayed({ after(pressEnter()) }, 250)
+        }, 700)
+        return true
+    }
+
+    /** Press the keyboard's Enter/Search key in the focused field (Android 11+). */
+    fun pressEnter(): Boolean {
+        if (Build.VERSION.SDK_INT < 30) return false
+        val f = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
+        return f.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+    }
+
     /** Buttons Leo never taps by voice — losing data or money must stay a human tap. */
-    private val DANGER = Regex("(?i)\\b(delete|remove|uninstall|pay|payment|buy|purchase|confirm|transfer|send money|reset|erase|clear all|clear data|format|log ?out|sign ?out|block|report|unsubscribe|deactivate)\\b")
+    private val DANGER = Regex("(?i)\\b(delete|remove|uninstall|pay|payment|buy|purchase|confirm|transfer|send money|reset|erase|clear all|clear data|format|log ?out|sign ?out|block|report|unsubscribe|subscribed|unlike|upi|deactivate)\\b|₹")
 
     /**
      * Tap the visible item whose text is exactly what the user said ("tap
@@ -172,7 +221,15 @@ class LeoAccessibility : AccessibilityService() {
         fun text(n: AccessibilityNodeInfo) = (n.text ?: n.contentDescription)?.toString()?.trim()?.lowercase().orEmpty()
         val exact = hits.filter { text(it) == q }
         val word = hits.filter { Regex("(^|\\W)" + Regex.escape(q) + "(\\W|$)").containsMatchIn(text(it)) }
-        val node = exact.firstOrNull() ?: word.singleOrNull() ?: return false
+        // icon buttons are often labelled "Like this video along with …", "Share" …:
+        // accept the single CLICKABLE item whose label starts with the words said
+        val starts = hits.filter { text(it).startsWith("$q ") }
+            .filter { it.isClickable || it.parent?.isClickable == true }
+        // several exact matches (a feed: every post has "Like") -> the one nearest
+        // the middle of the screen, i.e. the post the user is looking at
+        val midY = resources.displayMetrics.heightPixels / 2
+        val centered = exact.minByOrNull { n -> val r = android.graphics.Rect(); n.getBoundsInScreen(r); kotlin.math.abs(r.centerY() - midY) }
+        val node = centered ?: word.singleOrNull() ?: starts.singleOrNull() ?: return false
         if (DANGER.containsMatchIn(text(node))) return false
         var c: AccessibilityNodeInfo? = node
         var hops = 0
@@ -182,13 +239,14 @@ class LeoAccessibility : AccessibilityService() {
     }
 
     /** Type into the focused text box of the current app — "type hello". Never into passwords. */
-    fun typeText(text: String): Boolean {
+    fun typeText(text: String, replace: Boolean = false): Boolean {
         val root = rootInActiveWindow ?: return false
         if (root.packageName?.toString() == packageName) return false
         val field = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: firstEditable(root) ?: return false
         if (field.isPassword) return false
-        // append to what's already typed (Android 8+ can tell real text from the hint)
-        val existing = if (Build.VERSION.SDK_INT >= 26 && field.isEditable && !field.isShowingHintText) field.text?.toString().orEmpty() else ""
+        // append to what's already typed (Android 8+ can tell real text from the hint);
+        // a search replaces the old query instead
+        val existing = if (!replace && Build.VERSION.SDK_INT >= 26 && field.isEditable && !field.isShowingHintText) field.text?.toString().orEmpty() else ""
         val args = android.os.Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, (existing + (if (existing.isEmpty()) "" else " ") + text).trim())
         }

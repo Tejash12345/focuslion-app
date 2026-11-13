@@ -37,7 +37,7 @@ class LeoActivity : Activity() {
         private const val HOST = "new-app-ruddy-nine.vercel.app"
         private const val REQ_PERMS = 5101
         private const val REQ_FILE = 5102
-        private val ON_SCREEN = setOf("scroll", "tap", "type", "home", "back", "recents", "notifications", "quick_settings", "screenshot", "lock", "power_menu")
+        private val ON_SCREEN = setOf("scroll", "tap", "type", "swipe", "search_app", "home", "back", "recents", "notifications", "quick_settings", "screenshot", "lock", "power_menu")
         private val LEAVES = setOf("open_app", "settings", "youtube", "music", "maps", "web", "url", "camera", "video", "call", "sms",
             "whatsapp", "email", "calendar", "share", "send_whatsapp", "send_bulk", "close_app")
     }
@@ -116,11 +116,13 @@ class LeoActivity : Activity() {
         super.onResume()
         web.onResume()
         LeoBubbleService.markAppVisible(true) // hide the bubble + pause "Hey Leo" while Leo is open
+        AudioDuck.hold(this) // pause YouTube/music while Leo listens — it isn't heard as commands
     }
 
     override fun onPause() {
         web.onPause()
         tts?.stop()
+        AudioDuck.release(this) // Leo stepped aside: music/video carries on
         LeoBubbleService.markAppVisible(false)
         super.onPause()
     }
