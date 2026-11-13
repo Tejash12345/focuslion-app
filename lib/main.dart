@@ -285,7 +285,8 @@ Future<void> _handleDevice(String raw) async {
     if ((a == 'call' || a == 'sms' || a == 'whatsapp' || a == 'send_sms' || a == 'send_whatsapp' || a == 'schedule_message') && RegExp(r'[A-Za-zఀ-౿ऀ-ॿ]').hasMatch(who)) {
       await Permission.contacts.request();
     }
-    final out = await channel.invokeMethod(a == 'listen' ? 'deviceListen' : 'device', cmd);
+    final method = a == 'listen' ? 'deviceListen' : a == 'wake_start' ? 'wakeStart' : a == 'wake_stop' ? 'wakeStop' : 'device';
+    final out = await channel.invokeMethod(method, cmd);
     res = (out as Map?)?.cast<String, dynamic>() ?? {'ok': false, 'msg': 'No response'};
   } catch (e) {
     res = {'ok': false, 'msg': 'That did not work on this phone'};
@@ -899,6 +900,11 @@ class _WebShellState extends State<WebShell> with WidgetsBindingObserver {
           if (b64 != null && b64.isNotEmpty) {
             controller.runJavaScript("window.__flScreenFrame && window.__flScreenFrame('$b64')");
           }
+          break;
+        case 'wakeHeard':
+          // "Hey Leo …" was heard on-device — open Leo with the rest of the sentence
+          final rest = (call.arguments as String?) ?? '';
+          controller.runJavaScript('window.__flWake && window.__flWake(${jsonEncode(rest)})');
           break;
         case 'screenStopped':
           controller.runJavaScript('window.__flScreenStopped && window.__flScreenStopped()');

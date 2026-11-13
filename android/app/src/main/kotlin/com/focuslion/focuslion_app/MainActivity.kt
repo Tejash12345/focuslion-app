@@ -155,6 +155,17 @@ class MainActivity : FlutterActivity() {
                         val args = (call.arguments as? Map<String, Any?>) ?: emptyMap()
                         result.success(DeviceControl.handle(this, args))
                     }
+                    // "Hey Leo" wake word (opt-in, only while the app is on screen)
+                    "wakeStart" -> {
+                        WakeListen.start(this) { rest ->
+                            runOnUiThread { methodChannel?.invokeMethod("wakeHeard", rest) }
+                        }
+                        result.success(mapOf("ok" to true, "msg" to "Listening for Hey Leo"))
+                    }
+                    "wakeStop" -> {
+                        WakeListen.stop()
+                        result.success(mapOf("ok" to true, "msg" to "Stopped"))
+                    }
                     // offline voice input for Leo Live (on-device recognizer)
                     "deviceListen" -> {
                         val lang = call.argument<String>("lang") ?: ""
@@ -290,6 +301,12 @@ class MainActivity : FlutterActivity() {
                 .setStreamVolume(AudioManager.STREAM_ALARM, v, 0)
         } catch (_: Exception) {
         }
+    }
+
+    // never listen for "Hey Leo" when FocusLion isn't on screen
+    override fun onPause() {
+        WakeListen.stop()
+        super.onPause()
     }
 
     override fun onDestroy() {
