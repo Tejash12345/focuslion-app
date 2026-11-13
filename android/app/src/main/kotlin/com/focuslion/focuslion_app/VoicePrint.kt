@@ -19,7 +19,7 @@ object VoicePrint {
     private const val PREFS = "leo_voice"
 
     /** similarity needed for each strictness level (0 relaxed, 1 normal, 2 strict) */
-    private val LEVELS = doubleArrayOf(0.40, 0.50, 0.60)
+    private val LEVELS = doubleArrayOf(0.25, 0.33, 0.45)
 
     /** last comparison (for settings: "voice match 63%") */
     @Volatile var lastScore: Double = -1.0
@@ -88,7 +88,11 @@ object VoicePrint {
         val (v, frames) = vector(json) ?: run { lastScore = -1.0; return false }
         val score = cosine(mine, v)
         lastScore = score
-        val need = LEVELS[strict(ctx)] - (if (frames < 120) 0.08 else 0.0)
-        return score >= need
+        val need = LEVELS[strict(ctx)] - (if (frames < 120) 0.05 else 0.0)
+        val ok = score >= need
+        // learn: a clear match nudges the saved voice print toward how you sound
+        // now (this phone's mic, your room) — Leo gets better at knowing you
+        if (ok && score >= need + 0.1 && frames >= 100) save(ctx, average(listOf(mine, mine, mine, mine, mine, mine, mine, mine, mine, v)))
+        return ok
     }
 }
