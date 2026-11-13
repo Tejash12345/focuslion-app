@@ -14,5 +14,6 @@ class BootReceiver : BroadcastReceiver() {
             context.startForegroundService(Intent(context, GuardService::class.java))
         }
         ReminderScheduler.rescheduleAll(context)
+        Messaging.rescheduleAll(context) // Leo's scheduled messages
     }
 }

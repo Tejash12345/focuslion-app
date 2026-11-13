@@ -46,6 +46,10 @@
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <!-- "set an alarm for 6": hands the alarm to the Clock app -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+    <!-- "text Ravi I'm on my way" / scheduled SMS: Leo sends after you confirm -->
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <!-- scheduled messages fire on the exact minute (user grants "Alarms & reminders") -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <!-- "turn on Do Not Disturb while I study" (granted once in Settings) -->
     <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
     <!-- "brightness 40%" for the whole phone (granted once in Settings) -->
@@ -129,6 +133,10 @@
         </receiver>
 
         <!-- fires scheduled roar reminders -->
+        <!-- Leo Live scheduled SMS / WhatsApp messages -->
+        <receiver
+            android:name=".ScheduledMessageReceiver"
+            android:exported="false" />
         <receiver
             android:name=".ReminderReceiver"
             android:enabled="true"

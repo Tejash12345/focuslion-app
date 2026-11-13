@@ -24,6 +24,11 @@ class LeoAccessibility : AccessibilityService() {
         @Volatile private var lastApp: String = ""
         @Volatile private var lastAt: Long = 0
         fun lastScreen(): Triple<String, String, Long> = Triple(lastApp, lastText, lastAt)
+
+        // Leo just opened a WhatsApp chat with the user's confirmed text:
+        // tap its Send button once, within this window
+        @Volatile private var sendUntil: Long = 0
+        fun armSend(ms: Long) { sendUntil = System.currentTimeMillis() + ms }
     }
 
     private var lastSnap = 0L
@@ -37,6 +42,9 @@ class LeoAccessibility : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val pkg = event?.packageName?.toString() ?: return
+        if (sendUntil > System.currentTimeMillis() && (pkg == "com.whatsapp" || pkg == "com.whatsapp.w4b")) {
+            if (tapWhatsappSend(pkg)) sendUntil = 0
+        }
         // ignore our own app, the launcher-ish system UI and the keyboard
         if (pkg == packageName || pkg == "com.android.systemui" || pkg.contains("inputmethod") || pkg == homePackage()) return
         val now = System.currentTimeMillis()
@@ -75,6 +83,25 @@ class LeoAccessibility : AccessibilityService() {
         val d = n.contentDescription?.toString()?.trim().orEmpty()
         if (t.isNotEmpty()) sb.append(t).append('\n') else if (d.isNotEmpty() && d.length < 80) sb.append(d).append('\n')
         for (i in 0 until n.childCount) collect(n.getChild(i), sb, depth + 1)
+    }
+
+    /** Find WhatsApp's Send button (by id, then by label) and tap it once. */
+    private fun tapWhatsappSend(pkg: String): Boolean {
+        val root = rootInActiveWindow ?: return false
+        if (root.packageName?.toString() != pkg) return false
+        val byId = root.findAccessibilityNodeInfosByViewId("$pkg:id/send")
+        val target = byId.firstOrNull { it.isVisibleToUser && it.isEnabled }
+            ?: findByDesc(root, setOf("send", "पाठवा", "भेजें", "పంపు", "పంపండి"))
+            ?: return false
+        return target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    }
+
+    private fun findByDesc(n: AccessibilityNodeInfo?, labels: Set<String>, depth: Int = 0): AccessibilityNodeInfo? {
+        if (n == null || depth > 40) return null
+        val d = n.contentDescription?.toString()?.trim()?.lowercase()
+        if (d != null && d in labels && n.isClickable && n.isVisibleToUser) return n
+        for (i in 0 until n.childCount) findByDesc(n.getChild(i), labels, depth + 1)?.let { return it }
+        return null
     }
 
     override fun onInterrupt() {}

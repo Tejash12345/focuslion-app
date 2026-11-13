@@ -64,6 +64,11 @@ object DeviceControl {
                 "screen_time" -> screenTime(activity)
                 "power_menu", "lock", "screenshot", "home", "back", "recents", "notifications", "quick_settings" -> globalAction(activity, a)
                 "read_screen" -> readScreen(activity)
+                "send_sms" -> sendSmsNow(activity, str(args, "who"), str(args, "text"))
+                "send_whatsapp" -> sendWhatsappNow(activity, str(args, "who"), str(args, "text"))
+                "schedule_message" -> scheduleMessage(activity, str(args, "app"), str(args, "who"), str(args, "text"), str(args, "at"))
+                "scheduled_list" -> scheduledList(activity)
+                "scheduled_cancel" -> ok("Cancelled ${Messaging.cancel(activity, str(args, "query"))} scheduled message(s)")
                 else -> fail("Unknown phone action: $a")
             }
         } catch (e: Throwable) { // Throwable: also catches NoSuchMethodError on old Android
@@ -141,7 +146,7 @@ object DeviceControl {
      * "Mom" -> (display name, number) from contacts; digits pass straight
      * through. Leo may send alternatives "Amma|Mom|Mother" — first hit wins.
      */
-    private fun resolve(activity: Activity, whoAll: String): Pair<String, String>? {
+    internal fun resolve(activity: Activity, whoAll: String): Pair<String, String>? {
         for (who in whoAll.split('|').map { it.trim() }.filter { it.isNotEmpty() }) {
             resolveOne(activity, who)?.let { return it }
         }
@@ -422,6 +427,54 @@ object DeviceControl {
         if (text.isEmpty()) return fail("Open the app you want me to read, then come back and ask me")
         val ago = (System.currentTimeMillis() - at) / 60_000
         return ok("Screen from $app (${if (ago < 1) "just now" else "$ago min ago"}):\n$text", mapOf("app" to app))
+    }
+
+    // ---------- messaging (Leo confirms text + recipient with the user first) ----------
+    private fun hasSmsPermission(activity: Activity) =
+        ContextCompat.checkSelfPermission(activity, Manifest.permission.SEND_SMS) == PackageManager.PERMISSION_GRANTED
+
+    private fun sendSmsNow(activity: Activity, who: String, text: String): Map<String, Any?> {
+        if (text.isBlank()) return fail("What should the message say?")
+        val r = resolve(activity, who) ?: return fail("I couldn't find ${who.substringBefore('|')} in your contacts")
+        if (!hasSmsPermission(activity)) return sms(activity, r.second, text) // fall back to ready-to-send
+        Messaging.sendSms(activity, r.second, text)
+        return ok("SMS sent to ${r.first}")
+    }
+
+    private fun sendWhatsappNow(activity: Activity, who: String, text: String): Map<String, Any?> {
+        if (text.isBlank()) return fail("What should the message say?")
+        val r = resolve(activity, who) ?: return fail("I couldn't find ${who.substringBefore('|')} in your contacts")
+        if (LeoAccessibility.instance == null) {
+            // can't tap Send without the accessibility switch — open it ready to send
+            return whatsapp(activity, r.second, text)
+        }
+        if (!Messaging.whatsappAutoSend(activity, r.second, text)) return fail("WhatsApp isn't installed")
+        return ok("Sending your WhatsApp to ${r.first}")
+    }
+
+    /** at = "YYYY-MM-DDTHH:mm" in local time. */
+    private fun scheduleMessage(activity: Activity, appRaw: String, who: String, text: String, at: String): Map<String, Any?> {
+        if (text.isBlank()) return fail("What should the message say?")
+        val app = if (appRaw.lowercase().contains("sms") || appRaw.lowercase().contains("text")) "sms" else "whatsapp"
+        val r = resolve(activity, who) ?: return fail("I couldn't find ${who.substringBefore('|')} in your contacts")
+        val whenMs = try {
+            java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm", java.util.Locale.US).parse(at)?.time
+        } catch (_: Exception) { null } ?: return fail("I didn't get the time for that message")
+        if (whenMs < System.currentTimeMillis() - 60_000) return fail("That time has already passed")
+        if (app == "sms" && !hasSmsPermission(activity)) return fail("Allow SMS for FocusLion so I can send it on time")
+        Messaging.schedule(activity, app, r.first, r.second, text, whenMs)
+        val t = java.text.SimpleDateFormat("EEE d MMM, h:mm a", java.util.Locale.ENGLISH).format(java.util.Date(whenMs))
+        val note = if (!Messaging.canExact(activity)) " (allow \"Alarms & reminders\" for FocusLion to send it exactly on time)" else ""
+        return ok("Scheduled ${if (app == "sms") "SMS" else "WhatsApp"} to ${r.first} for $t$note")
+    }
+
+    private fun scheduledList(activity: Activity): Map<String, Any?> {
+        val all = Messaging.list(activity)
+        if (all.isEmpty()) return ok("No scheduled messages")
+        val fmt = java.text.SimpleDateFormat("EEE d MMM, h:mm a", java.util.Locale.ENGLISH)
+        return ok("Scheduled messages: " + all.joinToString("; ") {
+            "${fmt.format(java.util.Date(it.optLong("at")))} → ${it.optString("name")} (${it.optString("app")}): \"${it.optString("text").take(60)}\""
+        })
     }
 
     /** Today's screen time per app (top 8) — powers "how long was I on Instagram?". */

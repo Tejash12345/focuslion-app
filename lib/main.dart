@@ -278,7 +278,11 @@ Future<void> _handleDevice(String raw) async {
     final a = cmd['a']?.toString() ?? '';
     // names (not numbers) need the contacts permission — ask the first time
     final who = cmd['who']?.toString() ?? '';
-    if ((a == 'call' || a == 'sms' || a == 'whatsapp') && RegExp(r'[A-Za-zఀ-౿ऀ-ॿ]').hasMatch(who)) {
+    // sending SMS (now or scheduled) needs the SMS permission — ask the first time
+    if (a == 'send_sms' || (a == 'schedule_message' && (cmd['app']?.toString().toLowerCase().contains('sms') ?? false))) {
+      await Permission.sms.request();
+    }
+    if ((a == 'call' || a == 'sms' || a == 'whatsapp' || a == 'send_sms' || a == 'send_whatsapp' || a == 'schedule_message') && RegExp(r'[A-Za-zఀ-౿ऀ-ॿ]').hasMatch(who)) {
       await Permission.contacts.request();
     }
     final out = await channel.invokeMethod(a == 'listen' ? 'deviceListen' : 'device', cmd);
