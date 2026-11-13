@@ -123,6 +123,13 @@
         <!-- Leo-only pop-up window (bubble / "Hey Leo"): its own small task, so
              closing Leo returns to the app you were in, not to FocusLion -->
         <activity
+            android:name=".MicFixActivity"
+            android:exported="false"
+            android:taskAffinity="com.focuslion.micfix"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <activity
             android:name=".LeoActivity"
             android:exported="false"
             android:launchMode="singleTask"
@@ -174,6 +181,7 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 

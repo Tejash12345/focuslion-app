@@ -17,6 +17,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.util.Log
 import android.os.PowerManager
 import android.provider.Settings
 import android.view.Gravity
@@ -78,6 +79,8 @@ class LeoBubbleService : Service() {
 
         fun markAppVisible(v: Boolean) {
             appVisible = v
+            // FocusLion is on screen: Android lets us (re)claim background mic access now
+            if (v) instance?.regainMic()
             instance?.refresh()
         }
 
@@ -97,6 +100,7 @@ class LeoBubbleService : Service() {
                 "screenOn" to (s?.screenOn ?: true),
                 "lockWaiting" to (s != null && VoicePrint.locked(s) && s.spkModel == null),
                 "lastEnd" to (s?.lastEnd ?: ""),
+                "micBlocked" to (s?.micBlocked == true),
             )
         }
         /** A FocusLion page the Leo pop-up asked the full app to open. */
@@ -117,6 +121,9 @@ class LeoBubbleService : Service() {
     @Volatile var enrollState = ""
     /** why the mic loop last stopped by itself (shown in settings) */
     @Volatile var lastEnd = ""
+    /** Android blocked our background mic (we were restarted while FocusLion was closed) */
+    @Volatile var micBlocked = false
+    private var silentEnds = 0
     @Volatile private var destroyed = false
     @Volatile private var spkLoading = false
     private var voice: VoiceLoop? = null
@@ -143,10 +150,15 @@ class LeoBubbleService : Service() {
         bubbleWanted = intent?.getBooleanExtra(EXTRA_BUBBLE, bubbleWanted) ?: prefs.getBoolean("bubble", true)
         prefs.edit().putBoolean("on", true).putBoolean("wake", wakeWanted).putBoolean("bubble", bubbleWanted).apply()
         hiddenByUser = false
+        if (intent != null && intent.action == null) {
+            // a fresh start (from FocusLion / the fix screen): new mic loop with fresh mic access
+            silentEnds = 0
+            micBlocked = false
+            if (!capturing) stopWake()
+        }
         try {
             goForeground(if (wakeWanted && model == null) "Getting “Hey Leo” ready…" else readyText())
         } catch (e: Exception) {
-            // Android may refuse a mic service started from the background — just stop
             stopSelf()
             return START_NOT_STICKY
         }
@@ -211,7 +223,59 @@ class LeoBubbleService : Service() {
         val type = if (Build.VERSION.SDK_INT >= 34) {
             (if (wakeWanted) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0) or ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
         } else if (Build.VERSION.SDK_INT >= 30 && wakeWanted) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
-        ServiceCompat.startForeground(this, NOTIF_ID, n, type)
+        try {
+            ServiceCompat.startForeground(this, NOTIF_ID, n, type)
+            if (wakeWanted && Build.VERSION.SDK_INT >= 34) micBlocked = false
+        } catch (e: Exception) {
+            if (type == 0 || !wakeWanted) throw e
+            // Android 14+ refuses background mic for a service restarted while FocusLion
+            // was closed: keep running without it and ask the user for one tap
+            val noMic = if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
+            ServiceCompat.startForeground(this, NOTIF_ID, micOffNotif(), noMic)
+            micBlocked = true
+        }
+    }
+
+    /** the "tap to turn Hey Leo back on" notification (opens FocusLion for a moment) */
+    private fun micOffNotif(): Notification {
+        val open = PendingIntent.getActivity(this, 5, Intent(this, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        return NotificationCompat.Builder(this, CHANNEL)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle("🦁 Tap to turn “Hey Leo” back on")
+            .setContentText("Android paused Leo's microphone after the app was closed — one tap fixes it")
+            .setOngoing(true)
+            .setContentIntent(open)
+            .build()
+    }
+
+    /** FocusLion is on screen: claim the background microphone again (allowed now). */
+    fun regainMic() {
+        if (!wakeWanted) return
+        if (!micBlocked && silentEnds == 0) return
+        micBlocked = false
+        silentEnds = 0
+        lastEnd = ""
+        // re-start the service while FocusLion is on screen: Android grants the mic again
+        try { start(this, true, bubbleWanted) } catch (_: Exception) { }
+    }
+
+    private var lastMicFix = 0L
+
+    /** Mic is muted by Android: open the invisible fix screen (needs "display over other apps"). */
+    private fun fixMicSilently(): Boolean {
+        val now = System.currentTimeMillis()
+        if (!screenOn || appVisible || !Settings.canDrawOverlays(this) || now - lastMicFix < 90_000) return false
+        val km = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
+        if (km.isKeyguardLocked) return false // wait until the phone is unlocked
+        lastMicFix = now
+        Log.i("Leo", "mic muted by Android - restarting from the foreground")
+        return try {
+            startActivity(Intent(this, MicFixActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION or Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS))
+            true
+        } catch (_: Exception) { false }
     }
 
     private fun updateNotif(text: String) {
@@ -478,8 +542,18 @@ class LeoBubbleService : Service() {
                     // the loop ended by itself (mic taken by a call, error): clean up, retry soon
                     voice = null
                     lastEnd = loop.endReason
+                    Log.i("Leo", "mic loop ended: ${loop.endReason}")
+                    if (loop.endReason == "silent") {
+                        // Android muted us: fix it invisibly; if that's not possible, ask for one tap
+                        if (++silentEnds >= 1 && fixMicSilently()) { }
+                        else if (silentEnds >= 2 && !micBlocked) {
+                            micBlocked = true
+                            try { (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(NOTIF_ID, micOffNotif()) } catch (_: Exception) { }
+                        }
+                    } else if (loop.endReason.isEmpty()) silentEnds = 0
                     if (capturing) { capturing = false; listeningUi(false); AudioDuck.release(this) }
-                    main.postDelayed({ refresh() }, 2000)
+                    // mic blocked / silent: retry slowly (another app may just be recording)
+                    main.postDelayed({ refresh() }, if (silentEnds > 0 || loop.endReason == "mic") 10_000 else 2000)
                 }
             },
             // a video / song is playing: the wake word must be extra clear
@@ -488,6 +562,7 @@ class LeoBubbleService : Service() {
             spk = if (lock) spkModel else null,
             owner = { json -> VoicePrint.isOwner(this, json) },
             onStranger = {
+                Log.i("Leo", "ignored a voice that is not the owner (score ${VoicePrint.lastScore})")
                 if (voice === loop) {
                     val pct = (VoicePrint.lastScore * 100).toInt()
                     lastResult = "ignored — not your voice" + (if (pct > -100) " (match $pct%)" else "")
@@ -495,8 +570,9 @@ class LeoBubbleService : Service() {
             },
         )
         voice = loop
+        Log.i("Leo", "mic loop started (voiceLock=$lock)")
         loop.start()
-        main.postDelayed({ if (voice === loop) lastEnd = "" }, 3000) // running fine
+        main.postDelayed({ if (voice === loop && loop.endReason.isEmpty()) lastEnd = "" }, 6000) // running fine
     }
 
     // ---------- after "Hey Leo" ----------
@@ -510,6 +586,7 @@ class LeoBubbleService : Service() {
     private var mediaWasPlaying = false
 
     private fun onWakeHeard() {
+        Log.i("Leo", "wake heard (appVisible=$appVisible screenOn=$screenOn)")
         if (appVisible || !screenOn) return
         mediaWasPlaying = (getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager).isMusicActive
         capturing = true

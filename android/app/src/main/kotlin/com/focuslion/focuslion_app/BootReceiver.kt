@@ -7,6 +7,14 @@ import android.content.Intent
 /** After reboot: restart the guard (if it was on) and re-arm roar reminders. */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) {
+            // FocusLion was updated: bring Leo back (the update stopped him)
+            val lp = context.getSharedPreferences("leo_bubble", Context.MODE_PRIVATE)
+            if (lp.getBoolean("on", false)) {
+                try { LeoBubbleService.start(context, lp.getBoolean("wake", false), lp.getBoolean("bubble", true)) } catch (_: Exception) {}
+            }
+            return
+        }
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
         val on = context.getSharedPreferences(GuardService.PREFS, Context.MODE_PRIVATE)
             .getBoolean("guard_on", false)

@@ -27,7 +27,7 @@ object WakeListen {
     private var muted = false
 
     private val WAKE = Regex(
-        "(?:^|\\s)(?:hey|hi|hello|ok|okay|hay|he)\\s*(?:leo|lio|liyo|leyo|neo)\\b|హే\\s*లియో|హాయ్\\s*లియో|हे\\s*लियो|हाय\\s*लियो",
+        "(?:^|\\s)(?:hey|hi|hello|ok|okay|hay|he)\\s*(?:leo|lio|liyo|leyo|neo)\\b|^\\s*(?:leo|lio|liyo|leyo)\\b|హే\\s*లియో|హాయ్\\s*లియో|हे\\s*लियो|हाय\\s*लियो",
         RegexOption.IGNORE_CASE,
     )
 

@@ -587,10 +587,16 @@ object DeviceControl {
             "phone" to granted(activity, Manifest.permission.CALL_PHONE),
             "calendar" to granted(activity, Manifest.permission.READ_CALENDAR),
             "location" to granted(activity, Manifest.permission.ACCESS_COARSE_LOCATION),
+            // phones that kill apps when closed (Xiaomi, Oppo, Vivo, Realme, Huawei…) need Auto-start
+            "autostart" to (!needsAutostart() ||
+                activity.getSharedPreferences("leo_bubble", Context.MODE_PRIVATE).getBoolean("autostart_seen", false)),
         )
         val missing = st.filterValues { it == false }.keys
         return ok(if (missing.isEmpty()) "All set" else "Missing: ${missing.joinToString()}", st)
     }
+
+    private fun needsAutostart(): Boolean = Build.MANUFACTURER.lowercase() in
+        setOf("xiaomi", "redmi", "poco", "oppo", "realme", "vivo", "iqoo", "huawei", "honor", "oneplus", "letv", "meizu", "asus")
 
     /** One tap: ask for the permission, or open the exact settings screen. */
     private fun openPerm(activity: Activity, which: String): Map<String, Any?> {
@@ -611,6 +617,26 @@ object DeviceControl {
             "overlay" -> open(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, pkg))
             "battery" -> open(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, pkg))
             "notifications" -> open(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+            "autostart" -> {
+                activity.getSharedPreferences("leo_bubble", Context.MODE_PRIVATE).edit().putBoolean("autostart_seen", true).apply()
+                val tries = listOf(
+                    "com.miui.securitycenter" to "com.miui.permcenter.autostart.AutoStartManagementActivity",
+                    "com.coloros.safecenter" to "com.coloros.safecenter.permission.startup.StartupAppListActivity",
+                    "com.coloros.safecenter" to "com.coloros.safecenter.startupapp.StartupAppListActivity",
+                    "com.oppo.safe" to "com.oppo.safe.permission.startup.StartupAppListActivity",
+                    "com.vivo.permissionmanager" to "com.vivo.permissionmanager.activity.BgStartUpManagerActivity",
+                    "com.iqoo.secure" to "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity",
+                    "com.huawei.systemmanager" to "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity",
+                    "com.hihonor.systemmanager" to "com.hihonor.systemmanager.startupmgr.ui.StartupNormalAppListActivity",
+                    "com.oneplus.security" to "com.oneplus.security.chainlaunch.view.ChainLaunchAppListActivity",
+                    "com.letv.android.letvsafe" to "com.letv.android.letvsafe.AutobootManageActivity",
+                )
+                for ((p, c) in tries) {
+                    val i = Intent().setComponent(android.content.ComponentName(p, c)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    try { activity.startActivity(i); return ok("Turn ON FocusLion in this list") } catch (_: Exception) { }
+                }
+                open(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkg))
+            }
             else -> fail("Unknown permission")
         }
     }
@@ -649,6 +675,7 @@ object DeviceControl {
             st["screenOn"] == false -> "Screen is off — listening resumes when you turn it on ✓"
             (st["enroll"] as? String) in setOf("preparing", "recording") -> "Paused while recording your voice…"
             st["lockWaiting"] == true -> "Getting Voice Lock ready (needs internet once)…"
+            st["micBlocked"] == true -> "Android paused the background mic — tap the “Leo” notification or open FocusLion once"
             st["listening"] != true && (st["lastEnd"] as? String) == "mic" ->
                 "Another app is using the microphone (call, recorder, voice typing) — Leo retries every few seconds"
             st["listening"] != true && (st["lastEnd"] as? String).orEmpty().startsWith("error") ->
