@@ -32,7 +32,7 @@ object DeviceControl {
         return try {
             when (a) {
                 "open_app" -> openApp(activity, str(args, "name"))
-                "call" -> call(activity, str(args, "who"))
+                "call" -> call(activity, str(args, "who"), args["direct"] == true)
                 "sms" -> sms(activity, str(args, "who"), str(args, "text"))
                 "whatsapp" -> whatsapp(activity, str(args, "who"), str(args, "text"))
                 "alarm" -> alarm(activity, int(args, "hour"), int(args, "minute"), str(args, "label"))
@@ -66,6 +66,7 @@ object DeviceControl {
                 "read_screen" -> readScreen(activity)
                 "bubble_start" -> bubbleStart(activity, args["wake"] == true)
                 "bubble_stop" -> { LeoBubbleService.stop(activity); ok("Leo bubble off") }
+                "take_route" -> { val r = LeoBubbleService.takeRoute(); if (r == null) fail("none") else ok(r) }
                 "take_wake" -> { val w = LeoBubbleService.takeWake(); if (w == null) fail("none") else ok(w) }
                 "close_app" -> closeApp(activity, str(args, "name"))
                 "send_sms" -> sendSmsNow(activity, str(args, "who"), str(args, "text"))
@@ -183,8 +184,12 @@ object DeviceControl {
         return best?.let { it.second to it.third }
     }
 
-    private fun call(activity: Activity, who: String): Map<String, Any?> {
+    private fun call(activity: Activity, who: String, direct: Boolean = false): Map<String, Any?> {
         val r = resolve(activity, who) ?: return fail("I couldn't find ${who.substringBefore('|')} in your contacts")
+        // instant mode (user turned confirmation off): place the call straight away
+        if (direct && ContextCompat.checkSelfPermission(activity, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED) {
+            return start(activity, Intent(Intent.ACTION_CALL, Uri.parse("tel:" + Uri.encode(r.second))), "Calling ${r.first}")
+        }
         // ACTION_DIAL opens the dialer with the number filled in — you press call
         return start(activity, Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + Uri.encode(r.second))), "Ready to call ${r.first}")
     }

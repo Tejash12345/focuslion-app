@@ -48,6 +48,8 @@
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
     <!-- "text Ravi I'm on my way" / scheduled SMS: Leo sends after you confirm -->
     <uses-permission android:name="android.permission.SEND_SMS" />
+    <!-- "call Ravi" places the call directly when the user turned confirmation off -->
+    <uses-permission android:name="android.permission.CALL_PHONE" />
     <!-- scheduled messages fire on the exact minute (user grants "Alarms & reminders") -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <!-- floating Leo bubble + offline "Hey Leo" while FocusLion is closed -->
@@ -101,6 +103,19 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/leo_accessibility" />
         </service>
+
+        <!-- Leo-only pop-up window (bubble / "Hey Leo"): its own small task, so
+             closing Leo returns to the app you were in, not to FocusLion -->
+        <activity
+            android:name=".LeoActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.focuslion.leo"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Material.NoActionBar"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize" />
 
         <!-- Leo everywhere: floating bubble + offline "Hey Leo" wake word -->
         <service

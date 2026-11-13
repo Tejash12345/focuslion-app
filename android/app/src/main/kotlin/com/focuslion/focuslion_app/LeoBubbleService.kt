@@ -78,6 +78,9 @@ class LeoBubbleService : Service() {
         }
 
         fun takeWake(): String? { val p = pendingWake; pendingWake = null; return p }
+        /** A FocusLion page the Leo pop-up asked the full app to open. */
+        @Volatile var pendingRoute: String? = null
+        fun takeRoute(): String? { val p = pendingRoute; pendingRoute = null; return p }
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -263,9 +266,9 @@ class LeoBubbleService : Service() {
         if (now - lastFire < 2500) return
         lastFire = now
         pendingWake = rest
-        val i = Intent(this, MainActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            .putExtra("leo_open", true)
+        // open ONLY Leo (the pop-up window), not the whole FocusLion app
+        val i = Intent(this, LeoActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         try { startActivity(i) } catch (_: Exception) {}
     }
 

@@ -278,6 +278,8 @@ Future<void> _handleDevice(String raw) async {
     final a = cmd['a']?.toString() ?? '';
     // names (not numbers) need the contacts permission — ask the first time
     final who = cmd['who']?.toString() ?? '';
+    // instant calling (confirmation off) needs the Phone permission — ask the first time
+    if (a == 'call' && cmd['direct'] == true) await Permission.phone.request();
     // sending SMS (now or scheduled) needs the SMS permission — ask the first time
     if (a == 'send_sms' || (a == 'schedule_message' && (cmd['app']?.toString().toLowerCase().contains('sms') ?? false))) {
       await Permission.sms.request();
