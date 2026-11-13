@@ -16,51 +16,54 @@ import android.provider.Settings
 object QuickCommands {
 
     fun tryRun(ctx: Context, raw: String): Boolean {
-        val t = raw.lowercase()
-            .replace(Regex("[^\\p{L}\\p{N}\\s]"), " ")
-            .replace(Regex("\\b(please|leo|now|for me|the screen)\\b"), " ")
-            .replace(Regex("\\s+"), " ").trim()
+        val t = normalize(raw)
         if (t.isEmpty()) return false
         val a = LeoAccessibility.instance
+        val words = t.split(" ")
 
-        // ---- scrolling ----
-        Regex("^(scroll|swipe|page|move)( (down|up|more|back up))?( a bit| more)?$|^next page$|^go (down|up)$").find(t)?.let {
-            val up = t.contains("up") || t.contains("back")
-            return a?.scroll(!up) ?: false
+        // ---- scrolling (forgiving: "scroll", "scroll down a bit", "school done"…) ----
+        val isScroll = (words[0] == "scroll" && words.size <= 5 && words.drop(1).all { it in SCROLL_WORDS }) ||
+            Regex("^(go|move|page|swipe) (down|up)( more| to top)?$").matches(t) || t == "next page" || t == "page down" || t == "page up"
+        if (isScroll) {
+            val up = words.any { it == "up" || it == "top" || it == "upwards" || it == "back" }
+            // a recognised command never falls back to Leo's window, even if this screen can't scroll
+            a?.scroll(!up)
+            return a != null
         }
         // ---- reels / shorts / videos: next & previous ----
         when (t) {
-            "next", "next video", "next reel", "next short", "next one" -> return a?.scroll(true) ?: false
+            "next", "next video", "next reel", "next short", "next one", "next song", "go next", "play next video", "play next" -> { a?.scroll(true); return a != null }
             // during an ad, "skip" means the Skip button; otherwise next video
             "skip" -> return a?.tapText("skip ad") == true || a?.tapText("skip") == true || a?.scroll(true) == true
-            "previous", "previous video", "previous reel", "go previous", "last one" -> return a?.scroll(false) ?: false
-            "swipe left", "next story", "next photo", "next tab" -> return a?.swipeSideways(true) ?: false
-            "swipe right", "previous story", "previous photo", "previous tab" -> return a?.swipeSideways(false) ?: false
+            "previous", "previous video", "previous reel", "go previous", "last one", "previous song" -> { a?.scroll(false); return a != null }
+            "swipe left", "next story", "next photo", "next tab" -> { a?.swipeSideways(true); return a != null }
+            "swipe right", "previous story", "previous photo", "previous tab" -> { a?.swipeSideways(false); return a != null }
         }
         // ---- media in any app ----
         when (t) {
-            "pause", "pause video", "pause the video", "pause music", "stop music" -> return mediaKey(ctx, android.view.KeyEvent.KEYCODE_MEDIA_PAUSE)
+            "pause", "pause it", "pause video", "pause the video", "pause music", "stop", "stop video", "stop music", "stop it" -> return mediaKey(ctx, android.view.KeyEvent.KEYCODE_MEDIA_PAUSE)
             "play", "resume", "play video", "resume video", "play music" -> return mediaKey(ctx, android.view.KeyEvent.KEYCODE_MEDIA_PLAY)
-            "skip ad", "skip the ad", "skip ads" -> return a?.tapText("skip ad") == true || a?.tapText("skip") == true
+            "skip ad", "skip the ad", "skip ads", "skip add", "skip this ad", "skip it" -> return a?.tapText("skip ad") == true || a?.tapText("skip") == true
             "like", "like this", "like video", "like this video", "like it" -> return a?.tapText("like") ?: false
-            "subscribe" -> return a?.tapText("subscribe") ?: false
+            "subscribe", "subscribe to this channel", "subscribe channel", "subscribe to channel" -> return a?.tapText("subscribe") ?: false
             "share", "share this" -> return a?.tapText("share") ?: false
             "comment", "comments", "open comments" -> return a?.tapText("comment") == true || a?.tapText("comments") == true
         }
         // ---- search inside the app you're using ----
         Regex("^search( for)? (.+)$").find(t)?.let { m ->
+            if (LEO_OWNS.containsMatchIn(m.groupValues[2])) return false // "search messages from Ravi" -> Leo
             val svc = a ?: return false
             return svc.searchFor(m.groupValues[2]) { } // false -> Leo's window handles it
         }
         // ---- system navigation ----
         when {
-            Regex("^(go )?back$").matches(t) -> return a?.global("back") ?: false
+            Regex("^(go |press |tap )?back$").matches(t) -> return a?.global("back") ?: false
             Regex("^(go )?(to )?home( screen)?$").matches(t) -> return a?.global("home") ?: false
             Regex("^(show )?(my )?recent( apps)?$").matches(t) -> return a?.global("recents") ?: false
             Regex("^(show |open |pull down )?(my )?notifications$").matches(t) -> return a?.global("notifications") ?: false
             Regex("^(open )?quick settings$").matches(t) -> return a?.global("quick_settings") ?: false
             Regex("^(take (a )?)?screen ?shot$").matches(t) -> return a?.global("screenshot") ?: false
-            Regex("^lock( (the|my) (phone|screen))?$").matches(t) -> return a?.global("lock") ?: false
+            Regex("^lock( (my )?(phone|screen))?$").matches(t) -> return a?.global("lock") ?: false
             t == "send" || t == "tap send" || t == "send it" -> return a?.tapText("Send") ?: false
         }
         // ---- typing into the focused box: only "type …" ----
@@ -102,6 +105,37 @@ object QuickCommands {
         if (thing in setOf("storage", "battery", "display", "sound", "wifi", "wi fi", "bluetooth", "location", "apps",
                 "notifications", "accessibility", "developer options", "about phone", "airplane mode", "hotspot", "vpn", "nfc"))
             settingsIntent(thing) else null
+
+    private val SCROLL_WORDS = setOf("down", "up", "more", "to", "top", "bottom", "back", "upwards", "screen", "page", "slowly", "once", "twice")
+
+    /** Filler / politeness words people (and the offline recognizer) add. */
+    private val FILLER = setOf(
+        "please", "leo", "hey", "hi", "hello", "ok", "okay", "now", "the", "a", "an", "uh", "um", "umm", "ah", "er",
+        "just", "can", "could", "would", "will", "you", "u", "then", "little", "bit", "me", "quickly", "again", "pls",
+    )
+
+    /** Words the small offline model commonly mishears, mapped back. */
+    private val FIXES = mapOf(
+        "school" to "scroll", "scrawl" to "scroll", "crawl" to "scroll", "scrolled" to "scroll", "scrolling" to "scroll",
+        "squirrel" to "scroll", "scrool" to "scroll", "screw" to "scroll", "sroll" to "scroll", "stroll" to "scroll", "scrolls" to "scroll",
+        "done" to "down", "dawn" to "down", "town" to "down", "don" to "down", "downward" to "down", "downwards" to "down",
+        "nest" to "next", "necks" to "next", "text" to "next", "positive" to "pause", "paws" to "pause", "pas" to "pause",
+        "bag" to "back", "beck" to "back", "hoem" to "home", "tab" to "tap", "type" to "type", "like" to "like",
+    )
+
+    /** lowercase, no punctuation, mishearings fixed, filler words removed. */
+    fun normalize(raw: String): String {
+        val cleaned = raw.lowercase().replace(Regex("[^\\p{L}\\p{N}\\s]"), " ")
+            .replace("the screen", " ").replace("for me", " ")
+        val toks = cleaned.split(Regex("\\s+")).filter { it.isNotBlank() }
+        // "text"/"tab" only mean "next"/"tap" in a short command, not "text Ravi …"
+        val fixed = toks.map { w -> if (toks.size > 2 && (w == "text" || w == "tab")) w else FIXES[w] ?: w }
+        // keep filler words inside "type …" (the user's message)
+        val i = fixed.indexOf("type")
+        val head = if (i >= 0) fixed.subList(0, i + 1) else fixed
+        val tail = if (i >= 0) fixed.subList(i + 1, fixed.size) else emptyList()
+        return (head.filter { it !in FILLER } + tail).joinToString(" ").trim()
+    }
 
     /** play / pause whatever app is playing (YouTube, Spotify, …). */
     private fun mediaKey(ctx: Context, code: Int): Boolean = try {

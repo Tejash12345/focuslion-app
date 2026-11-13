@@ -111,9 +111,30 @@ class LeoAccessibility : AccessibilityService() {
 
     // ---------- hands on the current screen (the app the user is looking at) ----------
 
+    /**
+     * The window of the app the user is actually looking at (YouTube,
+     * WhatsApp…). rootInActiveWindow can be FocusLion's own floating bubble
+     * overlay, which made "scroll down" refuse and open Leo instead — so we
+     * look through the on-screen windows (top first) for a real app window
+     * that isn't ours.
+     */
+    fun appRoot(): AccessibilityNodeInfo? {
+        try {
+            val apps = windows
+                .filter { it.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION }
+                .sortedByDescending { it.layer }
+            for (w in apps) {
+                val r = w.root ?: continue
+                if (r.packageName?.toString() != packageName) return r
+            }
+        } catch (_: Exception) { }
+        val r = rootInActiveWindow ?: return null
+        return if (r.packageName?.toString() == packageName) null else r
+    }
+
     /** Scroll the main list/page of the current app (vertical lists first). */
     fun scroll(forward: Boolean): Boolean {
-        val root = rootInActiveWindow ?: return false
+        val root = appRoot() ?: return false
         if (root.packageName?.toString() == packageName) return false // never scroll Leo himself
         // prefer a node that can scroll DOWN/UP (vertical) over tab pagers
         if (Build.VERSION.SDK_INT >= 23) {
@@ -183,14 +204,14 @@ class LeoAccessibility : AccessibilityService() {
      * Returns whether a search box could be opened; `after` gets the final result.
      */
     fun searchFor(query: String, after: (Boolean) -> Unit): Boolean {
-        val root = rootInActiveWindow ?: return false
+        val root = appRoot() ?: return false
         if (root.packageName?.toString() == packageName) return false
         val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
         val opened = isSearchField(focused) || tapText("search") || tapText("search youtube") || tapText("search instagram")
         if (!opened) return false
         val h = android.os.Handler(android.os.Looper.getMainLooper())
         h.postDelayed({
-            val box = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            val box = appRoot()?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
             if (!isSearchField(box) || !typeText(query, replace = true)) { after(false); return@postDelayed }
             h.postDelayed({ after(pressEnter()) }, 250)
         }, 700)
@@ -200,7 +221,7 @@ class LeoAccessibility : AccessibilityService() {
     /** Press the keyboard's Enter/Search key in the focused field (Android 11+). */
     fun pressEnter(): Boolean {
         if (Build.VERSION.SDK_INT < 30) return false
-        val f = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
+        val f = appRoot()?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
         return f.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
     }
 
@@ -213,7 +234,7 @@ class LeoAccessibility : AccessibilityService() {
      * dangerous buttons (delete, pay, uninstall, …).
      */
     fun tapText(label: String): Boolean {
-        val root = rootInActiveWindow ?: return false
+        val root = appRoot() ?: return false
         if (root.packageName?.toString() == packageName) return false
         val q = label.trim().lowercase()
         if (q.length < 2) return false
@@ -240,7 +261,7 @@ class LeoAccessibility : AccessibilityService() {
 
     /** Type into the focused text box of the current app — "type hello". Never into passwords. */
     fun typeText(text: String, replace: Boolean = false): Boolean {
-        val root = rootInActiveWindow ?: return false
+        val root = appRoot() ?: return false
         if (root.packageName?.toString() == packageName) return false
         val field = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: firstEditable(root) ?: return false
         if (field.isPassword) return false

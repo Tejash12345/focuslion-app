@@ -15,5 +15,11 @@ class BootReceiver : BroadcastReceiver() {
         }
         ReminderScheduler.rescheduleAll(context)
         Messaging.rescheduleAll(context) // Leo's scheduled messages
+        // bring Leo's bubble / "Hey Leo" back after a restart (Android 14+ may refuse
+        // the microphone part until FocusLion is opened once — the service handles that)
+        val lp = context.getSharedPreferences("leo_bubble", Context.MODE_PRIVATE)
+        if (lp.getBoolean("on", false)) {
+            try { LeoBubbleService.start(context, lp.getBoolean("wake", false), lp.getBoolean("bubble", true)) } catch (_: Exception) {}
+        }
     }
 }

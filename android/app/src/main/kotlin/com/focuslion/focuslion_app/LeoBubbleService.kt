@@ -65,8 +65,11 @@ class LeoBubbleService : Service() {
         /** What was said after "Hey Leo" (or "" for a bubble tap) — the web app takes it. */
         @Volatile var pendingWake: String? = null
 
-        fun start(ctx: Context, wake: Boolean) {
-            val i = Intent(ctx, LeoBubbleService::class.java).putExtra(EXTRA_WAKE, wake)
+        const val EXTRA_BUBBLE = "bubble"
+
+        /** wake = background "Hey Leo"; bubble = show the floating lion (either or both). */
+        fun start(ctx: Context, wake: Boolean, bubble: Boolean = true) {
+            val i = Intent(ctx, LeoBubbleService::class.java).putExtra(EXTRA_WAKE, wake).putExtra(EXTRA_BUBBLE, bubble)
             if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i) else ctx.startService(i)
         }
 
@@ -78,6 +81,17 @@ class LeoBubbleService : Service() {
         }
 
         fun takeWake(): String? { val p = pendingWake; pendingWake = null; return p }
+
+        /** For Leo's settings: is "Hey Leo" really listening right now? */
+        fun status(): Map<String, Any?> {
+            val s = instance
+            return mapOf(
+                "running" to (s != null),
+                "listening" to (s?.speech != null),
+                "model" to (s?.model != null),
+                "wake" to (s?.wakeWanted == true),
+            )
+        }
         /** A FocusLion page the Leo pop-up asked the full app to open. */
         @Volatile var pendingRoute: String? = null
         fun takeRoute(): String? { val p = pendingRoute; pendingRoute = null; return p }
@@ -89,6 +103,7 @@ class LeoBubbleService : Service() {
     private var params: WindowManager.LayoutParams? = null
     private var hiddenByUser = false
     private var wakeWanted = false
+    private var bubbleWanted = true
     private var model: Model? = null
     private var speech: SpeechService? = null
     private var screenOn = true
@@ -104,8 +119,15 @@ class LeoBubbleService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) { stopSelf(); return START_NOT_STICKY }
-        wakeWanted = intent?.getBooleanExtra(EXTRA_WAKE, wakeWanted) ?: wakeWanted
+        if (intent?.action == ACTION_STOP) {
+            getSharedPreferences("leo_bubble", Context.MODE_PRIVATE).edit().putBoolean("on", false).apply()
+            stopSelf(); return START_NOT_STICKY
+        }
+        // a null intent = Android restarted us after killing the process: use the saved choice
+        val prefs = getSharedPreferences("leo_bubble", Context.MODE_PRIVATE)
+        wakeWanted = intent?.getBooleanExtra(EXTRA_WAKE, wakeWanted) ?: prefs.getBoolean("wake", false)
+        bubbleWanted = intent?.getBooleanExtra(EXTRA_BUBBLE, bubbleWanted) ?: prefs.getBoolean("bubble", true)
+        prefs.edit().putBoolean("on", true).putBoolean("wake", wakeWanted).putBoolean("bubble", bubbleWanted).apply()
         hiddenByUser = false
         try {
             goForeground(if (wakeWanted && model == null) "Getting “Hey Leo” ready…" else readyText())
@@ -116,11 +138,15 @@ class LeoBubbleService : Service() {
         }
         instance = this
         screenOn = (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
-        showBubble()
+        if (bubbleWanted) showBubble() else removeBubble()
         if (wakeWanted) prepareModel() else stopWake()
         refresh()
-        return START_NOT_STICKY
+        // ask Android to bring us back if it kills the process (battery savers do)
+        return START_STICKY
     }
+
+    // swiping FocusLion away from Recents must not stop "Hey Leo"
+    override fun onTaskRemoved(rootIntent: Intent?) { refresh() }
 
     override fun onCreate() {
         super.onCreate()
@@ -139,7 +165,11 @@ class LeoBubbleService : Service() {
         super.onDestroy()
     }
 
-    private fun readyText() = if (wakeWanted) "Say “Hey Leo” or tap the lion" else "Tap the lion to talk to Leo"
+    private fun readyText() = when {
+        wakeWanted && bubbleWanted -> "Say “Hey Leo” or tap the lion"
+        wakeWanted -> "Say “Hey Leo” anytime"
+        else -> "Tap the lion to talk to Leo"
+    }
 
     // ---------- foreground notification ----------
     private fun goForeground(text: String) {
@@ -419,7 +449,7 @@ class LeoBubbleService : Service() {
             s.startListening(l, 6000)
             cmdSpeech = s
             // silence right after "Hey Leo" -> hand over immediately (Leo listens himself)
-            main.postDelayed({ if (!done && !spoke) finish("") }, 1600)
+            main.postDelayed({ if (!done && !spoke) finish("") }, 3000)
             main.postDelayed({ if (!done) finish("") }, 6500)
         } catch (_: Exception) {
             // couldn't start the command recognizer: just open Leo listening

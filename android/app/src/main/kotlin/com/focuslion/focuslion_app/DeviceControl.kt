@@ -75,7 +75,8 @@ object DeviceControl {
                 "alarm_off" -> alarmOff(activity, str(args, "label"))
                 "timer_off" -> start(activity, Intent(AlarmClock.ACTION_DISMISS_TIMER), "Timer stopped")
                 "read_messages" -> readMessages(activity, int(args, "minutes"))
-                "bubble_start" -> bubbleStart(activity, args["wake"] == true)
+                "bubble_start" -> bubbleStart(activity, args["wake"] == true, args["bubble"] != false)
+                "leo_status" -> leoStatus(activity)
                 "bubble_stop" -> { LeoBubbleService.stop(activity); ok("Leo bubble off") }
                 "take_route" -> { val r = LeoBubbleService.takeRoute(); if (r == null) fail("none") else ok(r) }
                 "take_wake" -> {
@@ -514,14 +515,50 @@ object DeviceControl {
     }
 
     // ---------- Leo everywhere: floating bubble + offline "Hey Leo" ----------
-    private fun bubbleStart(activity: Activity, wake: Boolean): Map<String, Any?> {
+    private fun bubbleStart(activity: Activity, wake: Boolean, bubble: Boolean): Map<String, Any?> {
+        // needed for the bubble AND for Leo to pop up from the background on "Hey Leo"
         if (!Settings.canDrawOverlays(activity)) {
             activity.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${activity.packageName}")))
-            return fail("Allow \"Display over other apps\" for FocusLion, then turn the bubble on again")
+            return fail("Allow \"Display over other apps\" for FocusLion, then turn it on again")
         }
         val micOk = ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        LeoBubbleService.start(activity, wake && micOk)
-        return ok(if (wake && !micOk) "Bubble on — allow the microphone for \"Hey Leo\"" else "Leo bubble on")
+        if (wake && !micOk) {
+            androidx.core.app.ActivityCompat.requestPermissions(activity, arrayOf(Manifest.permission.RECORD_AUDIO), 7403)
+        }
+        // battery savers kill background listeners — ask once to run unrestricted
+        val pm = activity.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        val prefs = activity.getSharedPreferences("leo_bubble", Context.MODE_PRIVATE)
+        if (wake && !pm.isIgnoringBatteryOptimizations(activity.packageName) && !prefs.getBoolean("asked_battery", false)) {
+            prefs.edit().putBoolean("asked_battery", true).apply()
+            try {
+                activity.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${activity.packageName}")))
+            } catch (_: Exception) {}
+        }
+        LeoBubbleService.start(activity, wake && micOk, bubble)
+        return ok(when {
+            wake && !micOk -> "Allow the microphone for \"Hey Leo\""
+            wake -> "\"Hey Leo\" is on"
+            else -> "Leo bubble on"
+        })
+    }
+
+    /** "Hey Leo" health check for the settings screen. */
+    private fun leoStatus(activity: Activity): Map<String, Any?> {
+        val st = LeoBubbleService.status()
+        val pm = activity.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        val mic = ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        val battery = pm.isIgnoringBatteryOptimizations(activity.packageName)
+        val overlay = Settings.canDrawOverlays(activity)
+        val msg = when {
+            !mic -> "Microphone not allowed"
+            !overlay -> "Allow \"Display over other apps\""
+            st["running"] != true -> "Not running — open FocusLion once"
+            st["wake"] != true -> "Off"
+            st["model"] != true -> "Downloading the voice model (needs internet once)…"
+            !battery -> "Listening — but battery saver may stop it (set FocusLion to Unrestricted)"
+            else -> "Listening for “Hey Leo” ✓"
+        }
+        return ok(msg, st + mapOf("mic" to mic, "battery" to battery, "overlay" to overlay))
     }
 
     /** "close Messages" — go home and stop that app's background process. */
