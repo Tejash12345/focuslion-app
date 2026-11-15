@@ -702,9 +702,13 @@ class LeoBubbleService : Service() {
             return
         }
 
-        // 2. Instant screen command execution on the phone (10ms latency)
-        if (clean.isNotEmpty() && (QuickCommands.isScreenCommand(clean) || conf >= 0.70)) {
-            val handled = try { QuickCommands.tryRun(this, clean) } catch (_: Exception) { false }
+        // 2. Only exact, unmistakable screen gestures run instantly on-device without cloud
+        val isExactScreenAction = clean in setOf(
+            "scroll down", "scroll up", "scroll down slowly", "scroll up slowly",
+            "go back", "go home", "volume up", "volume down", "mute", "unmute"
+        )
+        if (!isOnline() || (isExactScreenAction && conf >= 0.95)) {
+            val handled = clean.isNotEmpty() && try { QuickCommands.tryRun(this, clean) } catch (_: Exception) { false }
             if (handled) {
                 lastResult = "done on screen"
                 ev("Leo: done on screen (\"$clean\")")
@@ -716,25 +720,8 @@ class LeoBubbleService : Service() {
             }
         }
 
-        if (clean.isNotEmpty() && LeoAccessibility.instance == null && QuickCommands.isScreenCommand(clean)) {
-            AudioDuck.release(this)
-            lastResult = "needs Accessibility"
-            askForAccessibility()
-            refresh()
-            return
-        }
-
-        // 3. Media noise filtering
-        if (mediaWasPlaying && (clean.isEmpty() || clean.split(" ").size < 2)) {
-            AudioDuck.release(this)
-            lastResult = "ignored (media playing)"
-            refresh()
-            return
-        }
-
-        // 4. LeoActivity foreground execution if active on screen
-        val leo = LeoActivity.instance
-        if (audio != null && isOnline() && leo != null && !leo.isFinishing && !leo.isDestroyed && appVisible) {
+        // 3. WITH INTERNET: send audio to Leo's Whisper AI Pro so it hears the user accurately
+        if (audio != null && isOnline()) {
             lastHeard = clean
             if (sendAudioToLeo(audio, clean, conf)) {
                 lastResult = "Leo is listening to your words (cloud)"
@@ -744,7 +731,43 @@ class LeoBubbleService : Service() {
             }
         }
 
-        // 5. Try delivering to background LeoActivity if running and ready
+        // 4. OFFLINE / FALLBACK
+        lastHeard = clean
+        if (clean.isEmpty() || !sendable(clean)) AudioDuck.release(this)
+
+        if (clean.isNotEmpty() && LeoAccessibility.instance == null && QuickCommands.isScreenCommand(clean)) {
+            lastResult = "needs Accessibility"
+            askForAccessibility()
+            refresh()
+            return
+        }
+
+        val handled = clean.isNotEmpty() && try { QuickCommands.tryRun(this, clean) } catch (_: Exception) { false }
+        if (handled) {
+            lastResult = "done on screen"
+            buzz()
+            startFollowing()
+            refresh()
+            return
+        }
+
+        // Media noise filtering
+        if (mediaWasPlaying && (clean.isEmpty() || clean.split(" ").size < 2)) {
+            AudioDuck.release(this)
+            lastResult = "ignored (media playing)"
+            refresh()
+            return
+        }
+
+        if (clean.isEmpty()) {
+            lastResult = "opened Leo (no command heard)"
+            pendingWake = ""
+            launchLeo()
+            refresh()
+            return
+        }
+
+        // Try delivering to background LeoActivity if running and ready
         if (clean.isNotEmpty() && sendToLeo(clean)) {
             lastResult = "handled by Leo in the background"
             startFollowing()
@@ -752,9 +775,8 @@ class LeoBubbleService : Service() {
             return
         }
 
-        // 6. Otherwise (window closed, AI question, or empty wake word): launch visible Leo window
         AudioDuck.release(this)
-        lastResult = if (clean.isEmpty()) "opened Leo (no command heard)" else "opened Leo: $clean"
+        lastResult = "opened Leo: $clean"
         pendingWake = clean
         launchLeo()
         refresh()

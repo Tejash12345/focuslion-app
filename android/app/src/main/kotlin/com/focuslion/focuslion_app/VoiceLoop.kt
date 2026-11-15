@@ -154,6 +154,7 @@ class VoiceLoop(
             val buf = ShortArray(chunk)
             var capturing = false
             var capStart = 0L
+            var lastVoiceMs = 0L
             var spoke = false
             var wasFollowing = false
             var prefix = "" // command words already heard together with the wake word
@@ -172,6 +173,8 @@ class VoiceLoop(
             fun finish(cmd: String) {
                 capturing = false
                 prefix = ""
+                lastVoiceMs = 0L
+                spoke = false
                 cmdRec?.reset()
                 resetWake()
                 followRec?.reset()
@@ -193,12 +196,14 @@ class VoiceLoop(
                 if (n == 0) { Thread.sleep(20); continue }
                 val raw = buf.copyOf(n)
                 val piece = buf.copyOf(n)
+                var currentRms = 0.0
                 // auto-gain: some phones (e.g. Motorola) give a very quiet mic — lift
                 // speech to the level the speech model expects
                 run {
                     var sum = 0.0
                     for (x in piece) sum += x.toDouble() * x
-                    val rms = Math.sqrt(sum / n)
+                    currentRms = Math.sqrt(sum / n)
+                    val rms = currentRms
                     floor = if (rms < floor) floor * 0.8 + rms * 0.2 else floor * 0.995 + rms * 0.005
                     if (rms > floor * 2.5 && rms > 150) speech = speech * 0.9 + rms * 0.1
                     val gain = (3000.0 / maxOf(speech, 300.0)).coerceIn(1.0, 6.0)
@@ -322,10 +327,11 @@ class VoiceLoop(
                     }
                     capturing = true
                     capStart = System.currentTimeMillis()
+                    lastVoiceMs = capStart
                     main.post { onWake() }
                     // the wake grammar only answers after a pause: if words came after
                     // "leo", the command is complete
-                    val stillTalking = !closed && wordsAfterPartial(r0.partialResult, cut).isNotEmpty()
+                    val stillTalking = !closed && hasPartialWords(r0.partialResult)
                     if (after.isNotEmpty() && after !in NOISE && !stillTalking) { finish(after); continue }
                     prefix = if (after in NOISE) "" else after
                     spoke = prefix.isNotEmpty() || stillTalking
@@ -335,20 +341,27 @@ class VoiceLoop(
                 val r = cmdRec ?: break
                 val now = System.currentTimeMillis()
                 addAudio(raw)
+                val voiceDetected = (currentRms > floor * 1.8 && currentRms > 200) || hasPartialWords(r.partialResult)
+                if (voiceDetected) {
+                    spoke = true
+                    lastVoiceMs = now
+                }
                 if (r.acceptWaveForm(piece, n)) {
                     val res1 = r.result
                     cmdConf = minOf(cmdConf, confAfter(res1, cut))
                     val cmd = (prefix + " " + wordsAfter(res1, cut).joinToString(" ")).trim()
                     if (cmd !in NOISE) { finish(cmd); continue }
-                } else {
-                    if (wordsAfterPartial(r.partialResult, cut).isNotEmpty()) spoke = true
                 }
-                // nothing said after "Hey Leo" -> hand over quickly (Leo listens himself)
-                if (!spoke && now - capStart > 3000) { finish(prefix); continue }
-                if (now - capStart > 8000) {
+                // nothing said after "Hey Leo" for 5 seconds -> Leo opens to listen himself
+                if (!spoke && now - capStart > 5000) { finish(prefix); continue }
+                // user spoke and then paused for 1.3s, or reached 8.5s limit -> finish command
+                if (spoke && ((now - lastVoiceMs > 1300 && now - capStart > 1800) || now - capStart > 8500)) {
                     val fr = r.finalResult
                     cmdConf = minOf(cmdConf, confAfter(fr, cut))
-                    finish((prefix + " " + wordsAfter(fr, cut).joinToString(" ")).trim()); continue
+                    val w = wordsAfter(fr, cut)
+                    val recognized = if (w.isNotEmpty()) w.joinToString(" ") else text(fr, "text")
+                    finish((prefix + " " + recognized).trim())
+                    continue
                 }
             }
         } catch (e: Exception) {
@@ -397,6 +410,18 @@ class VoiceLoop(
 
     /** Words of a final result that START after `cut` seconds (wake words removed). */
     private fun wordsAfter(json: String?, cut: Double): List<String> = timed(json, "result", cut)
+
+    private fun hasPartialWords(json: String?): Boolean = try {
+        val o = JSONObject(json ?: "{}")
+        val p = o.optString("partial", "").trim().lowercase()
+        if (p.isNotEmpty()) {
+            val words = p.split(Regex("\\s+")).filter { it.isNotEmpty() && !WAKE_WORD.matches(it) && it !in NOISE }
+            words.isNotEmpty()
+        } else {
+            val arr = o.optJSONArray("partial_result")
+            arr != null && arr.length() > 0
+        }
+    } catch (_: Exception) { false }
 
     private fun wordsAfterPartial(json: String?, cut: Double): List<String> = timed(json, "partial_result", cut)
 
