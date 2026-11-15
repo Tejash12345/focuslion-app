@@ -140,7 +140,8 @@ class VoiceLoop(
                 freeRec.setSpeakerModel(spk)
             }
             rec.startRecording()
-            val ring = ArrayDeque<ShortArray>() // recent audio (~9 s)
+            val ring = ArrayDeque<ShortArray>() // recent audio (~9 s), volume-boosted for the offline recognizer
+            val rawRing = ArrayDeque<ShortArray>() // the same audio as recorded (for Whisper: no boost distortion)
             val buf = ShortArray(chunk)
             var capturing = false
             var capStart = 0L
@@ -166,7 +167,7 @@ class VoiceLoop(
                 resetWake()
                 followRec?.reset()
                 freeRec?.reset()
-                ring.clear()
+                ring.clear(); rawRing.clear()
                 val audio = if (cmdSamples > 0) ShortArray(cmdSamples).also { out ->
                     var o = 0
                     for (p in cmdAudio) { p.copyInto(out, o); o += p.size }
@@ -181,6 +182,7 @@ class VoiceLoop(
                 val n = rec.read(buf, 0, chunk)
                 if (n < 0) { endReason = "mic"; break } // mic taken (call / other app) or dead: end, the service restarts us
                 if (n == 0) { Thread.sleep(20); continue }
+                val raw = buf.copyOf(n)
                 val piece = buf.copyOf(n)
                 // auto-gain: some phones (e.g. Motorola) give a very quiet mic — lift
                 // speech to the level the speech model expects
@@ -200,7 +202,9 @@ class VoiceLoop(
                     else if (++silentChunks >= 20) { endReason = "silent"; break } // ~4 s of exact zeros
                 }
                 ring.addLast(piece)
+                rawRing.addLast(raw)
                 while (ring.size > 45) ring.removeFirst() // ~9 s: long commands keep their start
+                while (rawRing.size > 45) rawRing.removeFirst()
 
                 // ---- follow-up commands (no "Hey Leo") for a while after a command ----
                 val now0 = System.currentTimeMillis()
@@ -234,14 +238,14 @@ class VoiceLoop(
                     }
                     if (hit != null && spk != null && !owner(hitRes)) {
                         f?.reset(); fr?.reset()
-                        ring.clear()
+                        ring.clear(); rawRing.clear()
                         main.post { onStranger() }
                         continue
                     }
                     if (hit != null) {
                         f?.reset(); fr?.reset()
                         resetWake()
-                        ring.clear() // never replay an executed follow-up again
+                        ring.clear(); rawRing.clear() // never replay an executed follow-up again
                         val said = hit; val isFree = free
                         main.post { onFollow(said, isFree) }
                         continue
@@ -289,17 +293,19 @@ class VoiceLoop(
                         closed = true
                     }
                     if (spk != null && !owner(lastRes)) { // not the owner's voice
-                        r0.reset(); ring.clear(); prefix = ""
+                        r0.reset(); ring.clear(); rawRing.clear(); prefix = ""
                         main.post { onStranger() }
                         continue
                     }
                     val after = words.joinToString(" ").trim()
-                    // keep the audio from just before the end of "leo" for the cloud recognizer
+                    // the cloud recognizer gets everything from the START of "hey leo"
+                    // (one-breath commands: the end of "leo" can be placed too late)
                     cmdAudio.clear(); cmdSamples = 0
                     run {
-                        var skip = if (leoEnd >= 0) (maxOf(0.0, cut - 1.6) * 16000).toInt()
-                            else maxOf(0, ringSamples - 40000)
-                        for (p in ring) {
+                        val wakeStart = wakeWordStart(res)
+                        var skip = if (wakeStart >= 0) (maxOf(0.0, wakeStart - ringStart - 0.4) * 16000).toInt()
+                            else maxOf(0, ringSamples - 64000)
+                        for (p in rawRing) {
                             if (skip >= p.size) { skip -= p.size; continue }
                             addAudio(if (skip > 0) p.copyOfRange(skip, p.size) else p)
                             skip = 0
@@ -319,7 +325,7 @@ class VoiceLoop(
 
                 val r = cmdRec ?: break
                 val now = System.currentTimeMillis()
-                addAudio(piece)
+                addAudio(raw)
                 if (r.acceptWaveForm(piece, n)) {
                     val res1 = r.result
                     cmdConf = minOf(cmdConf, confAfter(res1, cut))
@@ -358,6 +364,17 @@ class VoiceLoop(
     }
 
     /** End time (s) of the last wake word ("leo") in a grammar result, -1 if unknown. */
+    /** Start time (s) of the wake phrase ("hey"/"ok"/"leo"…) in a grammar result, -1 if unknown. */
+    private fun wakeWordStart(json: String?): Double = try {
+        val arr = JSONObject(json ?: "{}").optJSONArray("result")
+        var start = -1.0
+        if (arr != null) for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            if (o.optString("word") in setOf("hey", "hi", "ok", "okay", "hello", "leo")) { start = o.optDouble("start", -1.0); break }
+        }
+        start
+    } catch (_: Exception) { -1.0 }
+
     private fun wakeWordEnd(json: String?): Double = try {
         val arr = JSONObject(json ?: "{}").optJSONArray("result")
         var end = -1.0
