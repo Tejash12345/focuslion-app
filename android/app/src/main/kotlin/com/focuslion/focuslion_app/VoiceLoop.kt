@@ -108,6 +108,7 @@ class VoiceLoop(
         val rate = 16000
         val chunk = 3200 // 0.2 s per read
         var rec: AudioRecord? = null
+        val effects = ArrayList<android.media.audiofx.AudioEffect>()
         var wakeRec: Recognizer? = null
         var cmdRec: Recognizer? = null
         var followRec: Recognizer? = null
@@ -119,6 +120,14 @@ class VoiceLoop(
             rec = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, rate, AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, rate * 2 * 6))
             if (rec.state != AudioRecord.STATE_INITIALIZED) { endReason = "mic"; return@synchronized }
+            // the phone's own noise suppression + automatic volume: less background
+            // noise (fan, traffic, TV) and a louder, clearer voice (where supported)
+            val sid = rec.audioSessionId
+            val fx = ArrayList<String>()
+            try { if (android.media.audiofx.NoiseSuppressor.isAvailable()) android.media.audiofx.NoiseSuppressor.create(sid)?.let { it.enabled = true; effects += it; fx += "noise suppression" } } catch (_: Exception) { }
+            try { if (android.media.audiofx.AutomaticGainControl.isAvailable()) android.media.audiofx.AutomaticGainControl.create(sid)?.let { it.enabled = true; effects += it; fx += "AGC" } } catch (_: Exception) { }
+            try { if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) android.media.audiofx.AcousticEchoCanceler.create(sid)?.let { it.enabled = true; effects += it; fx += "echo cancel" } } catch (_: Exception) { }
+            if (fx.isNotEmpty()) LeoBubbleService.ev("hardware mic effects: " + fx.joinToString(", "))
             // grammar = only the wake phrases: tiny, accurate, low battery
             wakeRec = Recognizer(model, rate.toFloat(), "[\"hey leo\", \"hi leo\", \"okay leo\", \"hello leo\", \"ok leo\", \"leo\", \"[unk]\"]")
             wakeRec.setWords(true) // per-word confidence: video/music noise rarely scores high
@@ -346,6 +355,7 @@ class VoiceLoop(
             endReason = "error: ${e.message ?: e.javaClass.simpleName}"
             // mic busy / model problem: reported through onEnd, the service restarts us
         } finally {
+            for (e in effects) try { e.release() } catch (_: Exception) { }
             try { rec?.stop() } catch (_: Exception) { }
             try { rec?.release() } catch (_: Exception) { }
             try { wakeRec?.close() } catch (_: Exception) { }

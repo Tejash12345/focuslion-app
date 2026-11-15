@@ -309,7 +309,7 @@ WebViewController? _activeController;
 
 /// Maps a notification's data payload to the web-app route to open. For DMs we
 /// include the sender id so tapping the notification opens THAT conversation
-/// directly (Instagram-style) — the web ChatPage handles /chat?dm=<id>.
+/// directly (Instagram-style) — the web ChatPage handles `/chat?dm=<id>`.
 String? _routeForType(Map<String, dynamic> data) {
   final type = data['type'] as String?;
   final sender = data['sender'] as String?;

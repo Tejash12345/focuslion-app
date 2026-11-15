@@ -668,7 +668,7 @@ class LeoBubbleService : Service() {
         // wake word and writes the command down. Offline, the phone's recognizer is used.
         if (audio != null && isOnline()) {
             lastHeard = cmd
-            if (sendAudioToLeo(audio, cmd)) {
+            if (sendAudioToLeo(audio, cmd, conf)) {
                 lastResult = "Leo is listening to your words (cloud)"
                 startFollowing()
                 refresh()
@@ -788,21 +788,26 @@ class LeoBubbleService : Service() {
 
     /** 16 kHz mono PCM -> "data:audio/wav;base64,…" */
     private fun wavDataUrl(a: ShortArray): String {
+        // quiet phone mics: raise the volume evenly (never clipping) so Whisper
+        // doesn't treat the speech as silence and invent text
+        var peak = 1
+        for (x in a) { val v = kotlin.math.abs(x.toInt()); if (v > peak) peak = v }
+        val gain = (26000.0 / peak).coerceIn(1.0, 16.0)
         val data = a.size * 2
         val bb = java.nio.ByteBuffer.allocate(44 + data).order(java.nio.ByteOrder.LITTLE_ENDIAN)
         bb.put("RIFF".toByteArray()); bb.putInt(36 + data); bb.put("WAVE".toByteArray())
         bb.put("fmt ".toByteArray()); bb.putInt(16); bb.putShort(1); bb.putShort(1)
         bb.putInt(16000); bb.putInt(32000); bb.putShort(2); bb.putShort(16)
         bb.put("data".toByteArray()); bb.putInt(data)
-        for (x in a) bb.putShort(x)
+        for (x in a) bb.putShort((x * gain).coerceIn(-32768.0, 32767.0).toInt().toShort())
         return "data:audio/wav;base64," + android.util.Base64.encodeToString(bb.array(), android.util.Base64.NO_WRAP)
     }
 
     /** Give the command's audio to Leo's window (running hidden) to hear with Whisper. */
-    private fun sendAudioToLeo(audio: ShortArray, hint: String): Boolean {
+    private fun sendAudioToLeo(audio: ShortArray, hint: String, conf: Double = 0.0): Boolean {
         if (LeoAccessibility.instance == null && !Settings.canDrawOverlays(this)) return false
         val url = wavDataUrl(audio)
-        val js = "(typeof window.__flWakeAudio=='function'&&(window.__flWakeAudio(" + JSONObject.quote(url) + "," + JSONObject.quote(hint) + "," + mediaWasPlaying + "),1))||0"
+        val js = "(typeof window.__flWakeAudio=='function'&&(window.__flWakeAudio(" + JSONObject.quote(url) + "," + JSONObject.quote(hint) + "," + mediaWasPlaying + "," + "%.2f".format(java.util.Locale.US, conf) + "),1))||0"
         AudioDuck.hold(this)
         voice?.muteFollow(25_000)
         main.removeCallbacks(releaseDuck)
