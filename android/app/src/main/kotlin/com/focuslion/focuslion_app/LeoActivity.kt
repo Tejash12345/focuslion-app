@@ -61,6 +61,9 @@ class LeoActivity : Activity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // NOT hidden from recent apps: Android removes such windows as soon as they go
+        // to the background, which killed background commands. A "Leo" card instead.
+        @Suppress("DEPRECATION") setTaskDescription(android.app.ActivityManager.TaskDescription("Leo"))
         web = WebView(this)
         web.setBackgroundColor(0xFF02040C.toInt())
         setContentView(web)

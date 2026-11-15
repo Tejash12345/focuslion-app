@@ -134,7 +134,6 @@
             android:exported="false"
             android:launchMode="singleTask"
             android:taskAffinity="com.focuslion.leo"
-            android:excludeFromRecents="true"
             android:theme="@style/LeoTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
