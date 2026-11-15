@@ -375,6 +375,16 @@ class LeoActivity : Activity() {
             when (msg) {
                 "close" -> moveTaskToBack(true)
                 "spoke_end" -> if (!resumed) LeoBubbleService.instance?.leoSpokeEnd()
+                // just "Hey Leo" (no command): come up and listen
+                "show" -> {
+                    launchedHidden = false
+                    LeoBubbleService.pendingWake = ""
+                    LeoBubbleService.instance?.leoSpokeEnd()
+                    try {
+                        startActivity(Intent(this@LeoActivity, LeoActivity::class.java)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+                    } catch (_: Exception) { }
+                }
             }
         }
     }

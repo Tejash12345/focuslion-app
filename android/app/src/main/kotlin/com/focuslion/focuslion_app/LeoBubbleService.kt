@@ -663,11 +663,10 @@ class LeoBubbleService : Service() {
     private fun handleCommand(cmd: String, audio: ShortArray?, conf: Double) {
         capturing = false
         listeningUi(false)
-        // the phone's offline recognizer is rough: unless it heard a short command
-        // clearly, let Leo's cloud speech-to-text (Whisper — as good as Google) hear
-        // the real audio. Clear simple commands still run instantly on the phone.
-        val clear = cmd.isNotEmpty() && conf >= 0.8 && cmd.split(" ").size <= 6
-        if (!clear && audio != null && hasSpeech(audio) && !(mediaWasPlaying && cmd.split(" ").filter { it.isNotEmpty() }.size < 2)) {
+        // with internet, EVERY command (and the "Hey Leo" itself) is heard by Leo's
+        // cloud speech-to-text (Whisper — as good as Google): it double-checks the
+        // wake word and writes the command down. Offline, the phone's recognizer is used.
+        if (audio != null && isOnline()) {
             lastHeard = cmd
             if (sendAudioToLeo(audio, cmd)) {
                 lastResult = "Leo is listening to your words (cloud)"
@@ -766,6 +765,13 @@ class LeoBubbleService : Service() {
         }
     }
 
+    /** Internet that really works (not just "connected to Wi-Fi")? */
+    private fun isOnline(): Boolean = try {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+        caps != null && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    } catch (_: Exception) { false }
+
     /** Was something actually said (not just silence/hum)? */
     private fun hasSpeech(a: ShortArray): Boolean {
         if (a.size < 16000 * 0.8) return false
@@ -796,7 +802,7 @@ class LeoBubbleService : Service() {
     private fun sendAudioToLeo(audio: ShortArray, hint: String): Boolean {
         if (LeoAccessibility.instance == null && !Settings.canDrawOverlays(this)) return false
         val url = wavDataUrl(audio)
-        val js = "(typeof window.__flWakeAudio=='function'&&(window.__flWakeAudio(" + JSONObject.quote(url) + "," + JSONObject.quote(hint) + "),1))||0"
+        val js = "(typeof window.__flWakeAudio=='function'&&(window.__flWakeAudio(" + JSONObject.quote(url) + "," + JSONObject.quote(hint) + "," + mediaWasPlaying + "),1))||0"
         AudioDuck.hold(this)
         voice?.muteFollow(25_000)
         main.removeCallbacks(releaseDuck)

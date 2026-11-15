@@ -297,8 +297,8 @@ class VoiceLoop(
                     // keep the audio from just before the end of "leo" for the cloud recognizer
                     cmdAudio.clear(); cmdSamples = 0
                     run {
-                        var skip = if (leoEnd >= 0) (maxOf(0.0, cut - 0.25) * 16000).toInt()
-                            else maxOf(0, ringSamples - 16000)
+                        var skip = if (leoEnd >= 0) (maxOf(0.0, cut - 1.6) * 16000).toInt()
+                            else maxOf(0, ringSamples - 40000)
                         for (p in ring) {
                             if (skip >= p.size) { skip -= p.size; continue }
                             addAudio(if (skip > 0) p.copyOfRange(skip, p.size) else p)
