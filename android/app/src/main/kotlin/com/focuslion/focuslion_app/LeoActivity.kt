@@ -37,11 +37,15 @@ class LeoActivity : Activity() {
         @Volatile var instance: LeoActivity? = null
         /** start hidden and run this command in the background */
         const val EXTRA_HIDDEN_CMD = "hidden_cmd"
+        /** JavaScript to run once the page is ready (e.g. a voice clip for Whisper) */
+        @Volatile var pendingJs: String? = null
+        /** what the phone heard offline, used if the page can't take the audio */
+        @Volatile var pendingHint: String = ""
         private const val URL = "https://new-app-ruddy-nine.vercel.app/leo"
         private const val HOST = "new-app-ruddy-nine.vercel.app"
         private const val REQ_PERMS = 5101
         private const val REQ_FILE = 5102
-        private val ON_SCREEN = setOf("scroll", "stop_scroll", "tap", "type", "swipe", "search_app", "home", "back", "recents", "notifications", "quick_settings", "screenshot", "lock", "power_menu")
+        private val ON_SCREEN = setOf("quick", "scroll", "stop_scroll", "tap", "type", "swipe", "search_app", "home", "back", "recents", "notifications", "quick_settings", "screenshot", "lock", "power_menu")
         private val LEAVES = setOf("open_app", "settings", "youtube", "music", "maps", "web", "url", "camera", "video", "call", "sms",
             "whatsapp", "email", "calendar", "share", "send_whatsapp", "send_bulk", "close_app")
     }
@@ -125,7 +129,7 @@ class LeoActivity : Activity() {
         }
         web.loadUrl(URL)
         instance = this
-        intent?.getStringExtra(EXTRA_HIDDEN_CMD)?.takeIf { it.isNotBlank() }?.let { cmd ->
+        intent?.getStringExtra(EXTRA_HIDDEN_CMD)?.takeIf { it.isNotEmpty() }?.let { cmd ->
             hiddenCmd = cmd
             launchedHidden = true
             moveTaskToBack(true) // stay out of sight: the page loads and acts in the background
@@ -134,7 +138,7 @@ class LeoActivity : Activity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        val cmd = intent.getStringExtra(EXTRA_HIDDEN_CMD)?.takeIf { it.isNotBlank() } ?: run { launchedHidden = false; return }
+        val cmd = intent.getStringExtra(EXTRA_HIDDEN_CMD)?.takeIf { it.isNotEmpty() } ?: run { launchedHidden = false; return }
         launchedHidden = true
         moveTaskToBack(true)
         if (pageReady) deliverWhenReady(cmd, 0) else hiddenCmd = cmd
@@ -149,12 +153,22 @@ class LeoActivity : Activity() {
 
     private fun deliverWhenReady(cmd: String, tries: Int) {
         if (isFinishing || isDestroyed) return
-        web.evaluateJavascript("(typeof window.__flWake=='function'&&(window.__flWake(${JSONObject.quote(cmd)}),1))||0") { r ->
-            if (r?.trim() == "1") return@evaluateJavascript
+        val pj = pendingJs
+        // audio clip waiting: after a few tries, an older page without the audio
+        // handler gets the offline text instead
+        val text = if (cmd.isBlank()) pendingHint else cmd
+        val js = if (cmd.isBlank() && pj != null && tries < 6) pj
+            else "(typeof window.__flWake=='function'&&(window.__flWake(${JSONObject.quote(text)}),1))||0"
+        web.evaluateJavascript(js) { r ->
+            if (r?.trim() == "1") {
+                if (cmd.isBlank() && pendingJs === pj) { pendingJs = null; pendingHint = "" }
+                return@evaluateJavascript
+            }
             if (tries < 30) web.postDelayed({ deliverWhenReady(cmd, tries + 1) }, 500)
             else { // not signed in / page problem: show the window with the command
                 launchedHidden = false
-                LeoBubbleService.pendingWake = cmd
+                LeoBubbleService.pendingWake = text
+                pendingJs = null; pendingHint = ""
                 startActivity(Intent(this, LeoActivity::class.java)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
             }
@@ -166,6 +180,15 @@ class LeoActivity : Activity() {
      * run it here without bringing the window up (Leo answers out loud and
      * acts). Returns false if the page isn't ready — then the window opens.
      */
+    /** Run page JavaScript that returns 1 when the page took it; onFail otherwise. */
+    fun runInBackground(js: String, onFail: () -> Unit): Boolean {
+        if (!pageReady || isFinishing || isDestroyed) return false
+        runOnUiThread {
+            try { web.evaluateJavascript(js) { r -> if (r?.trim() != "1") onFail() } } catch (_: Exception) { onFail() }
+        }
+        return true
+    }
+
     fun deliverInBackground(cmd: String, onFail: () -> Unit): Boolean {
         if (!pageReady || isFinishing || isDestroyed) return false
         runOnUiThread {

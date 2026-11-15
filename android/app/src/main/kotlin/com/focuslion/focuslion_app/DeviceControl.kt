@@ -87,6 +87,11 @@ object DeviceControl {
                 "read_messages" -> readMessages(activity, int(args, "minutes"))
                 "bubble_start" -> bubbleStart(activity, args["wake"] == true, args["bubble"] != false)
                 "leo_status" -> leoStatus(activity)
+                // a phone/screen command heard by the cloud recognizer: run it right here
+                "quick" -> if (QuickCommands.tryRun(activity, str(args, "text"))) {
+                    LeoBubbleService.instance?.leoSpokeEnd() // nothing to say: let the music/video resume
+                    ok("Done")
+                } else fail("not a quick command")
                 "voice_status" -> voiceStatus(activity)
                 "voice_enroll" -> {
                     val s = LeoBubbleService.instance

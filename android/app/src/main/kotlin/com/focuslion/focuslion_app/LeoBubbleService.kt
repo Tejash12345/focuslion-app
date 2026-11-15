@@ -593,7 +593,7 @@ class LeoBubbleService : Service() {
         // callbacks from an old (stopped) loop are ignored: only the current one counts
         loop = VoiceLoop(m,
             onWake = { if (voice === loop) onWakeHeard() },
-            onCommand = { cmd -> if (voice === loop) onCommandHeard(cmd) },
+            onCommand = { cmd, audio, conf -> if (voice === loop) onCommandHeard(cmd, audio, conf) },
             onEnd = {
                 if (voice === loop) {
                     // the loop ended by itself (mic taken by a call, error): clean up, retry soon
@@ -654,10 +654,28 @@ class LeoBubbleService : Service() {
     }
 
     /** The command after "Hey Leo" ("" = nothing said: Leo's window listens himself). */
-    private fun onCommandHeard(cmd: String) {
+    private fun onCommandHeard(cmd: String, audio: ShortArray? = null, conf: Double = 1.0) {
         if (!capturing) return
+        handleCommand(cmd, audio, conf)
+        ev("command: " + lastResult + " (offline sure: " + (conf * 100).toInt() + "%)")
+    }
+
+    private fun handleCommand(cmd: String, audio: ShortArray?, conf: Double) {
         capturing = false
         listeningUi(false)
+        // the phone's offline recognizer is rough: unless it heard a short command
+        // clearly, let Leo's cloud speech-to-text (Whisper — as good as Google) hear
+        // the real audio. Clear simple commands still run instantly on the phone.
+        val clear = cmd.isNotEmpty() && conf >= 0.8 && cmd.split(" ").size <= 6
+        if (!clear && audio != null && hasSpeech(audio) && !(mediaWasPlaying && cmd.split(" ").filter { it.isNotEmpty() }.size < 2)) {
+            lastHeard = cmd
+            if (sendAudioToLeo(audio, cmd)) {
+                lastResult = "Leo is listening to your words (cloud)"
+                startFollowing()
+                refresh()
+                return
+            }
+        }
         lastHeard = cmd
         if (cmd.isEmpty() || !sendable(cmd)) AudioDuck.release(this) // else held on while Leo answers
         // screen commands ("scroll down", "tap storage", "go back"…) run right
@@ -721,7 +739,7 @@ class LeoBubbleService : Service() {
         main.postDelayed(releaseDuck, 30_000)
         val i = Intent(this, LeoActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
-            .putExtra(LeoActivity.EXTRA_HIDDEN_CMD, cmd)
+            .putExtra(LeoActivity.EXTRA_HIDDEN_CMD, cmd.ifEmpty { " " })
         try { startActivity(i) } catch (_: Exception) { pendingWake = cmd; launchLeo() }
     }
 
@@ -746,6 +764,54 @@ class LeoBubbleService : Service() {
                 launchLeo()
             }
         }
+    }
+
+    /** Was something actually said (not just silence/hum)? */
+    private fun hasSpeech(a: ShortArray): Boolean {
+        if (a.size < 16000 * 0.8) return false
+        var loud = 0
+        var i = 6400 // skip the tail of "leo" at the start of the clip
+        while (i + 1600 <= a.size) {
+            var sum = 0.0
+            for (j in i until i + 1600) sum += a[j].toDouble() * a[j]
+            if (Math.sqrt(sum / 1600) > 600) loud++
+            i += 1600
+        }
+        return loud >= 3 // at least ~0.3 s of voice
+    }
+
+    /** 16 kHz mono PCM -> "data:audio/wav;base64,…" */
+    private fun wavDataUrl(a: ShortArray): String {
+        val data = a.size * 2
+        val bb = java.nio.ByteBuffer.allocate(44 + data).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        bb.put("RIFF".toByteArray()); bb.putInt(36 + data); bb.put("WAVE".toByteArray())
+        bb.put("fmt ".toByteArray()); bb.putInt(16); bb.putShort(1); bb.putShort(1)
+        bb.putInt(16000); bb.putInt(32000); bb.putShort(2); bb.putShort(16)
+        bb.put("data".toByteArray()); bb.putInt(data)
+        for (x in a) bb.putShort(x)
+        return "data:audio/wav;base64," + android.util.Base64.encodeToString(bb.array(), android.util.Base64.NO_WRAP)
+    }
+
+    /** Give the command's audio to Leo's window (running hidden) to hear with Whisper. */
+    private fun sendAudioToLeo(audio: ShortArray, hint: String): Boolean {
+        if (LeoAccessibility.instance == null && !Settings.canDrawOverlays(this)) return false
+        val url = wavDataUrl(audio)
+        val js = "(typeof window.__flWakeAudio=='function'&&(window.__flWakeAudio(" + JSONObject.quote(url) + "," + JSONObject.quote(hint) + "),1))||0"
+        AudioDuck.hold(this)
+        voice?.muteFollow(25_000)
+        main.removeCallbacks(releaseDuck)
+        main.postDelayed(releaseDuck, 30_000)
+        val leo = LeoActivity.instance
+        if (leo != null) {
+            return leo.runInBackground(js) { main.post { // page not ready: fall back to the rough text
+                releaseDuck.run()
+                handleCommand(hint, null, 1.0)
+            } }
+        }
+        LeoActivity.pendingJs = js
+        LeoActivity.pendingHint = hint
+        launchLeoHidden("")
+        return true
     }
 
     private val releaseDuck = Runnable {

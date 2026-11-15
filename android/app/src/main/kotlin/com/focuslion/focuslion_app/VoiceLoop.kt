@@ -27,7 +27,8 @@ import org.vosk.SpeakerModel
 class VoiceLoop(
     private val model: Model,
     private val onWake: () -> Unit,
-    private val onCommand: (String) -> Unit,
+    /** text (offline, may be rough), the command's audio (for cloud speech-to-text), lowest word confidence */
+    private val onCommand: (String, ShortArray?, Double) -> Unit,
     private val onEnd: () -> Unit,
     /** true while a video / music is playing — the wake word must be extra clear then */
     private val isNoisy: () -> Boolean = { false },
@@ -150,6 +151,10 @@ class VoiceLoop(
             var heardSound = false
             var wakeFed = 0L // samples given to wakeRec since its last reset
             var cut = 0.0 // command = words starting after this time (cmdRec's clock)
+            val cmdAudio = ArrayList<ShortArray>() // what was said after "leo" (for cloud speech-to-text)
+            var cmdSamples = 0
+            var cmdConf = 1.0 // lowest confidence of the command's words (offline recognizer)
+            fun addAudio(p: ShortArray) { if (cmdSamples < 16000 * 12) { cmdAudio += p; cmdSamples += p.size } }
             var floor = 200.0 // background noise level
             var speech = 1000.0 // typical speech level
             fun resetWake() { wakeRec?.reset(); wakeFed = 0 }
@@ -162,7 +167,13 @@ class VoiceLoop(
                 followRec?.reset()
                 freeRec?.reset()
                 ring.clear()
-                main.post { onCommand(if (cmd in NOISE) "" else cmd) }
+                val audio = if (cmdSamples > 0) ShortArray(cmdSamples).also { out ->
+                    var o = 0
+                    for (p in cmdAudio) { p.copyInto(out, o); o += p.size }
+                } else null
+                val conf = cmdConf
+                cmdAudio.clear(); cmdSamples = 0; cmdConf = 1.0
+                main.post { onCommand(if (cmd in NOISE) "" else cmd, audio, conf) }
             }
 
             var silentChunks = 0
@@ -261,10 +272,11 @@ class VoiceLoop(
                     // "leo" are the command (never the video's words before it)
                     val r0 = cmdRec ?: break
                     r0.reset()
+                    cmdConf = 1.0; cmdAudio.clear(); cmdSamples = 0
                     val words = ArrayList<String>()
                     var lastRes: String? = null
                     for (p in ring.toList()) {
-                        if (r0.acceptWaveForm(p, p.size)) { val x = r0.result; lastRes = better(lastRes, x); words += wordsAfter(x, cut) }
+                        if (r0.acceptWaveForm(p, p.size)) { val x = r0.result; lastRes = better(lastRes, x); words += wordsAfter(x, cut); cmdConf = minOf(cmdConf, confAfter(x, cut)) }
                     }
                     prefix = ""
                     var closed = false
@@ -273,6 +285,7 @@ class VoiceLoop(
                         val x = r0.finalResult
                         lastRes = better(lastRes, x)
                         words += wordsAfter(x, cut)
+                        cmdConf = minOf(cmdConf, confAfter(x, cut))
                         closed = true
                     }
                     if (spk != null && !owner(lastRes)) { // not the owner's voice
@@ -281,6 +294,17 @@ class VoiceLoop(
                         continue
                     }
                     val after = words.joinToString(" ").trim()
+                    // keep the audio from just before the end of "leo" for the cloud recognizer
+                    cmdAudio.clear(); cmdSamples = 0
+                    run {
+                        var skip = if (leoEnd >= 0) (maxOf(0.0, cut - 0.25) * 16000).toInt()
+                            else maxOf(0, ringSamples - 16000)
+                        for (p in ring) {
+                            if (skip >= p.size) { skip -= p.size; continue }
+                            addAudio(if (skip > 0) p.copyOfRange(skip, p.size) else p)
+                            skip = 0
+                        }
+                    }
                     capturing = true
                     capStart = System.currentTimeMillis()
                     main.post { onWake() }
@@ -295,15 +319,22 @@ class VoiceLoop(
 
                 val r = cmdRec ?: break
                 val now = System.currentTimeMillis()
+                addAudio(piece)
                 if (r.acceptWaveForm(piece, n)) {
-                    val cmd = (prefix + " " + wordsAfter(r.result, cut).joinToString(" ")).trim()
+                    val res1 = r.result
+                    cmdConf = minOf(cmdConf, confAfter(res1, cut))
+                    val cmd = (prefix + " " + wordsAfter(res1, cut).joinToString(" ")).trim()
                     if (cmd !in NOISE) { finish(cmd); continue }
                 } else {
                     if (wordsAfterPartial(r.partialResult, cut).isNotEmpty()) spoke = true
                 }
                 // nothing said after "Hey Leo" -> hand over quickly (Leo listens himself)
                 if (!spoke && now - capStart > 3000) { finish(prefix); continue }
-                if (now - capStart > 8000) { finish((prefix + " " + wordsAfter(r.finalResult, cut).joinToString(" ")).trim()); continue }
+                if (now - capStart > 8000) {
+                    val fr = r.finalResult
+                    cmdConf = minOf(cmdConf, confAfter(fr, cut))
+                    finish((prefix + " " + wordsAfter(fr, cut).joinToString(" ")).trim()); continue
+                }
             }
         } catch (e: Exception) {
             endReason = "error: ${e.message ?: e.javaClass.simpleName}"
@@ -341,6 +372,18 @@ class VoiceLoop(
     private fun wordsAfter(json: String?, cut: Double): List<String> = timed(json, "result", cut)
 
     private fun wordsAfterPartial(json: String?, cut: Double): List<String> = timed(json, "partial_result", cut)
+
+    /** Lowest confidence among the words after `cut` (1.0 if none). */
+    private fun confAfter(json: String?, cut: Double): Double = try {
+        val arr = JSONObject(json ?: "{}").optJSONArray("result")
+        var m = 1.0
+        if (arr != null) for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            val w = o.optString("word")
+            if (o.optDouble("start", 0.0) >= cut - 0.05 && !WAKE_WORD.matches(w) && w != "hey") m = minOf(m, o.optDouble("conf", 1.0))
+        }
+        m
+    } catch (_: Exception) { 1.0 }
 
     private fun timed(json: String?, key: String, cut: Double): List<String> = try {
         val arr = JSONObject(json ?: "{}").optJSONArray(key)
