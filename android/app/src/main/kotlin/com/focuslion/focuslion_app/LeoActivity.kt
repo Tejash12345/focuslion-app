@@ -129,17 +129,27 @@ class LeoActivity : Activity() {
         }
         web.loadUrl(URL)
         instance = this
-        intent?.getStringExtra(EXTRA_HIDDEN_CMD)?.takeIf { it.isNotEmpty() }?.let { cmd ->
-            hiddenCmd = cmd
+        val hc = intent?.getStringExtra(EXTRA_HIDDEN_CMD)?.takeIf { it.isNotEmpty() }
+        LeoBubbleService.ev("Leo window started" + if (hc != null) " (invisible, for a command)" else "")
+        if (hc != null) {
+            hiddenCmd = hc
             launchedHidden = true
+            web.visibility = android.view.View.INVISIBLE // nothing on screen, nothing to close
             moveTaskToBack(true) // stay out of sight: the page loads and acts in the background
         }
     }
 
+    /** The user really opens Leo: make the window visible again. */
+    private fun showWindow() {
+        launchedHidden = false
+        web.visibility = android.view.View.VISIBLE
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        val cmd = intent.getStringExtra(EXTRA_HIDDEN_CMD)?.takeIf { it.isNotEmpty() } ?: run { launchedHidden = false; return }
+        val cmd = intent.getStringExtra(EXTRA_HIDDEN_CMD)?.takeIf { it.isNotEmpty() } ?: run { showWindow(); return }
         launchedHidden = true
+        web.visibility = android.view.View.INVISIBLE
         moveTaskToBack(true)
         if (pageReady) deliverWhenReady(cmd, 0) else hiddenCmd = cmd
     }
@@ -166,7 +176,8 @@ class LeoActivity : Activity() {
             }
             if (tries < 30) web.postDelayed({ deliverWhenReady(cmd, tries + 1) }, 500)
             else { // not signed in / page problem: show the window with the command
-                launchedHidden = false
+                LeoBubbleService.ev("Leo page not ready — opening the window")
+                showWindow()
                 LeoBubbleService.pendingWake = text
                 pendingJs = null; pendingHint = ""
                 startActivity(Intent(this, LeoActivity::class.java)
@@ -224,6 +235,7 @@ class LeoActivity : Activity() {
     }
 
     override fun onDestroy() {
+        LeoBubbleService.ev("Leo window closed" + if (launchedHidden) " (was invisible)" else "")
         if (instance === this) instance = null
         tts?.shutdown()
         web.destroy()
@@ -377,7 +389,7 @@ class LeoActivity : Activity() {
                 "spoke_end" -> if (!resumed) LeoBubbleService.instance?.leoSpokeEnd()
                 // just "Hey Leo" (no command): come up and listen
                 "show" -> {
-                    launchedHidden = false
+                    showWindow()
                     LeoBubbleService.pendingWake = ""
                     LeoBubbleService.instance?.leoSpokeEnd()
                     try {
@@ -385,6 +397,7 @@ class LeoActivity : Activity() {
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
                     } catch (_: Exception) { }
                 }
+                else -> if (msg.startsWith("log:")) LeoBubbleService.ev("Leo: " + msg.removePrefix("log:").take(120))
             }
         }
     }
