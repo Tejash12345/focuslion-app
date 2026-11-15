@@ -75,7 +75,30 @@ class LeoBubbleService : Service() {
             if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i) else ctx.startService(i)
         }
 
-        fun stop(ctx: Context) { ctx.stopService(Intent(ctx, LeoBubbleService::class.java)) }
+        fun stop(ctx: Context) {
+            // turned off by the user: don't bring it back
+            ctx.getSharedPreferences("leo_bubble", Context.MODE_PRIVATE).edit().putBoolean("on", false).apply()
+            ctx.stopService(Intent(ctx, LeoBubbleService::class.java))
+        }
+
+        // ---------- Leo log: what happened, kept across restarts (shown in settings) ----------
+        private val events = ArrayDeque<String>()
+
+        fun ev(msg: String) {
+            android.util.Log.i("Leo", msg)
+            val line = java.text.SimpleDateFormat("dd MMM HH:mm:ss", java.util.Locale.US).format(java.util.Date()) + "  " + msg
+            synchronized(events) {
+                if (events.isEmpty()) instance?.let { s ->
+                    s.getSharedPreferences("leo_bubble", Context.MODE_PRIVATE).getString("log", "")
+                        ?.split('|')?.filter { it.isNotBlank() }?.forEach { events.addLast(it) }
+                }
+                events.addLast(line.replace('|', '/'))
+                while (events.size > 40) events.removeFirst()
+                instance?.getSharedPreferences("leo_bubble", Context.MODE_PRIVATE)?.edit()?.putString("log", events.joinToString("|"))?.apply()
+            }
+        }
+
+        fun log(): String = synchronized(events) { events.toList().takeLast(25).reversed().joinToString("\n") }
 
         fun markAppVisible(v: Boolean) {
             appVisible = v
@@ -96,6 +119,7 @@ class LeoBubbleService : Service() {
                 "model" to (s?.model != null),
                 "wake" to (s?.wakeWanted == true),
                 "enroll" to (s?.enrollState ?: ""),
+                "log" to log(),
                 "appVisible" to appVisible,
                 "screenOn" to (s?.screenOn ?: true),
                 "lockWaiting" to (s != null && VoicePrint.locked(s) && s.spkModel == null),
@@ -126,6 +150,8 @@ class LeoBubbleService : Service() {
     private var silentEnds = 0
     @Volatile private var destroyed = false
     @Volatile private var spkLoading = false
+    /** the Voice Lock model couldn't load: listen without it rather than not at all */
+    @Volatile private var spkFailed = false
     private var voice: VoiceLoop? = null
     private var screenOn = true
     private var lastFire = 0L
@@ -172,15 +198,43 @@ class LeoBubbleService : Service() {
     }
 
     // swiping FocusLion away from Recents must not stop "Hey Leo"
-    override fun onTaskRemoved(rootIntent: Intent?) { refresh() }
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        ev("FocusLion closed from recent apps")
+        // some phones (Motorola, Xiaomi, Oppo…) kill the whole app right after this:
+        // ask Android to start Leo again in a few seconds
+        scheduleRestart(4000)
+        refresh()
+    }
+
+    /** Bring Leo back after `ms` if he was killed (only while the user has him turned on). */
+    private fun scheduleRestart(ms: Long) {
+        val prefs = getSharedPreferences("leo_bubble", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("on", false)) return
+        try {
+            val i = Intent(applicationContext, LeoBubbleService::class.java)
+                .putExtra(EXTRA_WAKE, prefs.getBoolean("wake", false)).putExtra(EXTRA_BUBBLE, prefs.getBoolean("bubble", true))
+                .putExtra("restart", true)
+            val pi = if (Build.VERSION.SDK_INT >= 26) PendingIntent.getForegroundService(applicationContext, 9, i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+                else PendingIntent.getService(applicationContext, 9, i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+            val am = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+            val at = System.currentTimeMillis() + ms
+            if (Build.VERSION.SDK_INT >= 31 && !am.canScheduleExactAlarms()) am.setAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, at, pi)
+            else am.setExactAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, at, pi)
+        } catch (_: Exception) { }
+    }
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
+        ev("Leo service started")
         val f = IntentFilter().apply { addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON) }
         registerReceiver(screenRx, f)
     }
 
     override fun onDestroy() {
+        val stillWanted = getSharedPreferences("leo_bubble", Context.MODE_PRIVATE).getBoolean("on", false)
+        ev(if (stillWanted) "Leo was stopped by Android — restarting" else "Leo turned off")
+        if (stillWanted) scheduleRestart(5000)
         destroyed = true
         instance = null
         main.removeCallbacksAndMessages(null)
@@ -270,7 +324,7 @@ class LeoBubbleService : Service() {
         val km = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
         if (km.isKeyguardLocked) return false // wait until the phone is unlocked
         lastMicFix = now
-        Log.i("Leo", "mic muted by Android - restarting from the foreground")
+        ev("mic muted by Android - restarting from the foreground")
         return try {
             startActivity(Intent(this, MicFixActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION or Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS))
@@ -520,14 +574,17 @@ class LeoBubbleService : Service() {
         if (voice != null || capturing) return
         if (enrollState == "preparing" || enrollState == "recording") return
         val lock = VoicePrint.locked(this)
-        if (lock && spkModel == null) {
+        if (lock && spkModel == null && !spkFailed) {
             // load the speaker model first (once at a time), then try again
             if (!spkLoading) {
                 spkLoading = true
                 Thread {
-                    try { loadSpk() } catch (_: Exception) { lastResult = "Voice Lock model missing — needs internet once" }
+                    try { loadSpk() } catch (_: Exception) {
+                        spkFailed = true
+                        ev("Voice Lock model missing (needs internet once) — listening without Voice Lock")
+                    }
                     spkLoading = false
-                    if (spkModel != null) main.post { refresh() }
+                    main.post { refresh() }
                 }.start()
             }
             return
@@ -542,7 +599,7 @@ class LeoBubbleService : Service() {
                     // the loop ended by itself (mic taken by a call, error): clean up, retry soon
                     voice = null
                     lastEnd = loop.endReason
-                    Log.i("Leo", "mic loop ended: ${loop.endReason}")
+                    ev("mic loop ended: ${loop.endReason}")
                     if (loop.endReason == "silent") {
                         // Android muted us: fix it invisibly; if that's not possible, ask for one tap
                         if (++silentEnds >= 1 && fixMicSilently()) { }
@@ -562,7 +619,7 @@ class LeoBubbleService : Service() {
             spk = if (lock) spkModel else null,
             owner = { json -> VoicePrint.isOwner(this, json) },
             onStranger = {
-                Log.i("Leo", "ignored a voice that is not the owner (score ${VoicePrint.lastScore})")
+                ev("ignored a voice that is not the owner (score ${VoicePrint.lastScore})")
                 if (voice === loop) {
                     val pct = (VoicePrint.lastScore * 100).toInt()
                     lastResult = "ignored — not your voice" + (if (pct > -100) " (match $pct%)" else "")
@@ -570,7 +627,7 @@ class LeoBubbleService : Service() {
             },
         )
         voice = loop
-        Log.i("Leo", "mic loop started (voiceLock=$lock)")
+        ev("mic loop started (voiceLock=$lock)")
         loop.start()
         main.postDelayed({ if (voice === loop && loop.endReason.isEmpty()) lastEnd = "" }, 6000) // running fine
     }
@@ -586,7 +643,7 @@ class LeoBubbleService : Service() {
     private var mediaWasPlaying = false
 
     private fun onWakeHeard() {
-        Log.i("Leo", "wake heard (appVisible=$appVisible screenOn=$screenOn)")
+        ev("wake heard (appVisible=$appVisible screenOn=$screenOn)")
         if (appVisible || !screenOn) return
         mediaWasPlaying = (getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager).isMusicActive
         capturing = true
