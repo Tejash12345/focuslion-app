@@ -17,6 +17,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.os.PowerManager
 import android.provider.Settings
@@ -155,6 +156,8 @@ class LeoBubbleService : Service() {
     private var voice: VoiceLoop? = null
     private var screenOn = true
     private var lastFire = 0L
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
 
     private val screenRx = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
@@ -227,8 +230,25 @@ class LeoBubbleService : Service() {
         super.onCreate()
         instance = this
         ev("Leo service started")
+        try {
+            tts = TextToSpeech(this) { status ->
+                ttsReady = (status == TextToSpeech.SUCCESS)
+                if (ttsReady) {
+                    try { tts?.language = java.util.Locale.US } catch (_: Exception) {}
+                }
+            }
+        } catch (_: Exception) {}
         val f = IntentFilter().apply { addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON) }
         registerReceiver(screenRx, f)
+    }
+
+    fun speak(text: String) {
+        if (!ttsReady || text.isBlank()) return
+        main.post {
+            try {
+                tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "leo-bubble-${System.currentTimeMillis()}")
+            } catch (_: Exception) {}
+        }
     }
 
     override fun onDestroy() {
@@ -240,6 +260,8 @@ class LeoBubbleService : Service() {
         main.removeCallbacksAndMessages(null)
         stopWake()
         AudioDuck.release(this) // never leave the user's music paused
+        try { tts?.stop(); tts?.shutdown() } catch (_: Exception) {}
+        tts = null
         try { unregisterReceiver(screenRx) } catch (_: Exception) {}
         // free the model only after the mic loop has really finished with it
         model?.let { m -> Thread { synchronized(VoiceLoop.mic) { try { m.close() } catch (_: Exception) {} } }.start() }
@@ -663,69 +685,77 @@ class LeoBubbleService : Service() {
     private fun handleCommand(cmd: String, audio: ShortArray?, conf: Double) {
         capturing = false
         listeningUi(false)
-        // with internet, EVERY command (and the "Hey Leo" itself) is heard by Leo's
-        // cloud speech-to-text (Whisper — as good as Google): it double-checks the
-        // wake word and writes the command down. Offline, the phone's recognizer is used.
-        if (audio != null && isOnline()) {
-            lastHeard = cmd
-            if (sendAudioToLeo(audio, cmd, conf)) {
+        val clean = cmd.trim()
+
+        // 1. Clear memory voice command: instant local handling
+        if (clean.matches(Regex("^(clear|reset|forget)( (leo|your|the))? (memory|skills|all|everything)$", RegexOption.IGNORE_CASE))) {
+            AudioDuck.release(this)
+            getSharedPreferences("leo_bubble", Context.MODE_PRIVATE).edit().remove("log").apply()
+            synchronized(events) { events.clear() }
+            LeoActivity.instance?.runInBackground("(typeof window.clearLeoBrain=='function'&&(window.clearLeoBrain(),1))||0") {}
+            buzz()
+            lastResult = "memory cleared"
+            ev("Leo: memory cleared")
+            speak("Memory cleared.")
+            LeoActivity.instance?.let { it.runOnUiThread { it.speak("Memory cleared.", "en", 0.95f) } }
+            refresh()
+            return
+        }
+
+        // 2. Instant screen command execution on the phone (10ms latency)
+        if (clean.isNotEmpty() && (QuickCommands.isScreenCommand(clean) || conf >= 0.70)) {
+            val handled = try { QuickCommands.tryRun(this, clean) } catch (_: Exception) { false }
+            if (handled) {
+                lastResult = "done on screen"
+                ev("Leo: done on screen (\"$clean\")")
+                AudioDuck.release(this)
+                buzz()
+                startFollowing()
+                refresh()
+                return
+            }
+        }
+
+        if (clean.isNotEmpty() && LeoAccessibility.instance == null && QuickCommands.isScreenCommand(clean)) {
+            AudioDuck.release(this)
+            lastResult = "needs Accessibility"
+            askForAccessibility()
+            refresh()
+            return
+        }
+
+        // 3. Media noise filtering
+        if (mediaWasPlaying && (clean.isEmpty() || clean.split(" ").size < 2)) {
+            AudioDuck.release(this)
+            lastResult = "ignored (media playing)"
+            refresh()
+            return
+        }
+
+        // 4. LeoActivity foreground execution if active on screen
+        val leo = LeoActivity.instance
+        if (audio != null && isOnline() && leo != null && !leo.isFinishing && !leo.isDestroyed && appVisible) {
+            lastHeard = clean
+            if (sendAudioToLeo(audio, clean, conf)) {
                 lastResult = "Leo is listening to your words (cloud)"
                 startFollowing()
                 refresh()
                 return
             }
         }
-        lastHeard = cmd
-        if (cmd.isEmpty() || !sendable(cmd)) AudioDuck.release(this) // else held on while Leo answers
-        // screen commands ("scroll down", "tap storage", "go back"…) run right
-        // here on the app you're using — no Leo window popping up over it
-        if (cmd.isNotEmpty() && LeoAccessibility.instance == null && QuickCommands.isScreenCommand(cmd)) {
-            lastResult = "needs Accessibility"
-            askForAccessibility()
-            refresh()
-            return
-        }
-        val handled = cmd.isNotEmpty() && try { QuickCommands.tryRun(this, cmd) } catch (_: Exception) { false }
-        if (handled) {
-            lastResult = "done on screen"
-            buzz()
-            startFollowing()
-            refresh()
-            return
-        }
-        // while a video/song plays, a "wake" with no clear command is almost always
-        // the video's own audio — ignore it instead of popping Leo up
-        if (mediaWasPlaying && (cmd.isEmpty() || cmd.split(" ").size < 2)) {
-            lastResult = "ignored (probably the video/music)"
-            refresh()
-            return
-        }
-        if (cmd.isEmpty()) {
-            lastResult = "opened Leo (no command heard)"
-            pendingWake = ""
-            launchLeo()
-            refresh()
-            return
-        }
-        // Leo's window was already opened once: handle the command in the
-        // background (he answers out loud and acts) — no window popping up again
-        if (sendToLeo(cmd)) {
+
+        // 5. Try delivering to background LeoActivity if running and ready
+        if (clean.isNotEmpty() && sendToLeo(clean)) {
             lastResult = "handled by Leo in the background"
             startFollowing()
             refresh()
             return
         }
-        // Leo's window isn't running yet: start it HIDDEN — it runs the command in
-        // the background and only shows itself if something needs you
-        if (LeoActivity.instance == null && (LeoAccessibility.instance != null || Settings.canDrawOverlays(this))) {
-            lastResult = "handled by Leo (window started hidden)"
-            launchLeoHidden(cmd)
-            startFollowing()
-            refresh()
-            return
-        }
-        lastResult = "sent to Leo"
-        pendingWake = cmd
+
+        // 6. Otherwise (window closed, AI question, or empty wake word): launch visible Leo window
+        AudioDuck.release(this)
+        lastResult = if (clean.isEmpty()) "opened Leo (no command heard)" else "opened Leo: $clean"
+        pendingWake = clean
         launchLeo()
         refresh()
     }

@@ -369,7 +369,7 @@ class LeoActivity : Activity() {
         }
     }
 
-    private fun speak(text: String, lang: String, rate: Float) {
+    fun speak(text: String, lang: String = "en", rate: Float = 0.95f) {
         val t = tts ?: return
         if (!ttsReady || text.isBlank()) { js("window.__flSpeakEnded && window.__flSpeakEnded();"); return }
         if (lang.isNotEmpty()) {

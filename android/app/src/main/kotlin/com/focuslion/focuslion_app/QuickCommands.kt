@@ -30,6 +30,18 @@ object QuickCommands {
     fun tryRun(ctx: Context, raw: String): Boolean {
         val t = normalize(raw)
         if (t.isEmpty()) return false
+
+        // ---- clear memory / reset Leo brain ----
+        if (Regex("^(clear|reset|forget)( (leo|your|the))? (memory|skills|all|everything)$").matches(t)) {
+            try {
+                ctx.getSharedPreferences("leo_bubble", Context.MODE_PRIVATE).edit().remove("log").apply()
+                LeoActivity.instance?.runInBackground("(typeof window.clearLeoBrain=='function'&&(window.clearLeoBrain(),1))||0") {}
+                LeoBubbleService.instance?.speak("Memory cleared.")
+                LeoActivity.instance?.let { it.runOnUiThread { it.speak("Memory cleared.", "en", 0.95f) } }
+            } catch (_: Exception) {}
+            return true
+        }
+
         val a = LeoAccessibility.instance
         val words = t.split(" ")
 
